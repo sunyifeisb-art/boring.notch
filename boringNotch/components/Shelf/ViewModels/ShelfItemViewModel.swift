@@ -98,6 +98,10 @@ final class ShelfItemViewModel: ObservableObject {
 
     // MARK: - Actions
     func handleClick(event: NSEvent, view: NSView) {
+        if selection.isSelectionMode {
+            selection.toggle(item)
+            return
+        }
         let flags = event.modifierFlags
         if flags.contains(.shift) {
             selection.shiftSelect(to: item, in: ShelfStateViewModel.shared.items)
@@ -542,7 +546,8 @@ final class ShelfItemViewModel: ObservableObject {
 
             case "Remove":
                 let selected = ShelfSelectionModel.shared.selectedItems(in: ShelfStateViewModel.shared.items)
-                for it in selected { ShelfActionService.remove(it) }
+                ShelfActionService.remove(selected)
+                ShelfSelectionModel.shared.clear()
                 
             case "Remove Background":
                 handleRemoveBackground()

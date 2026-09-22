@@ -11,6 +11,7 @@ import IOKit
 import CoreGraphics
 
 class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
+    private let agentBridge = AgentBridgeService()
     
     @objc func isAccessibilityAuthorized(with reply: @escaping (Bool) -> Void) {
         reply(AXIsProcessTrusted())
@@ -137,6 +138,53 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
             return
         }
         reply(false)
+    }
+
+    // MARK: - AI Agent Bridge
+
+    @objc func startAgentBridge(with reply: @escaping (NSString?) -> Void) {
+        do {
+            try agentBridge.start()
+            reply(nil)
+        } catch {
+            reply(error.localizedDescription as NSString)
+        }
+    }
+
+    @objc func stopAgentBridge() {
+        agentBridge.stop()
+    }
+
+    @objc func agentSessionsJSON(with reply: @escaping (NSData) -> Void) {
+        reply(agentBridge.sessionsJSON() as NSData)
+    }
+
+    @objc func respondToAgent(_ sessionID: String, responseJSON: NSData, with reply: @escaping (Bool) -> Void) {
+        reply(agentBridge.respond(sessionID: sessionID, response: responseJSON as Data))
+    }
+
+    @objc func installAgentHooks(with reply: @escaping (NSArray) -> Void) {
+        reply(agentBridge.installHooks() as NSArray)
+    }
+
+    @objc func jumpToAgentTerminal(_ sessionID: String, with reply: @escaping (Bool) -> Void) {
+        reply(agentBridge.jumpToTerminal(sessionID: sessionID))
+    }
+
+    @objc func sendAgentMessage(
+        _ sessionID: NSString?,
+        source: String,
+        cwd: NSString?,
+        message: String,
+        with reply: @escaping (NSString?) -> Void
+    ) {
+        let identifier = agentBridge.sendMessage(
+            sessionID: sessionID as String?,
+            source: source,
+            cwd: cwd as String?,
+            message: message
+        )
+        reply(identifier as NSString?)
     }
 
     // MARK: - Private helpers for DisplayServices / IOKit access

@@ -18,6 +18,7 @@ final class ShelfSelectionModel: ObservableObject {
     static let shared = ShelfSelectionModel()
 
     @Published private(set) var selectedIDs: Set<UUID> = []
+    @Published private(set) var isSelectionMode = false
 
     // Anchor for shift-range selection
     private var lastAnchorID: UUID? = nil
@@ -49,6 +50,21 @@ final class ShelfSelectionModel: ObservableObject {
         lastAnchorID = item.id
     }
 
+    func beginSelection() {
+        isSelectionMode = true
+    }
+
+    func endSelection() {
+        isSelectionMode = false
+        clear()
+    }
+
+    func selectAll(in allItems: [ShelfItem]) {
+        isSelectionMode = true
+        selectedIDs = Set(allItems.map(\.id))
+        lastAnchorID = allItems.last?.id
+    }
+
     func shiftSelect(to item: ShelfItem, in allItems: [ShelfItem]) {
         // Determine anchor
         let anchorID = lastAnchorID ?? selectedIDs.first ?? item.id
@@ -70,6 +86,7 @@ final class ShelfSelectionModel: ObservableObject {
 
     // Keep anchor sane if items array changed drastically (optional helper)
     func ensureValidAnchor(in allItems: [ShelfItem]) {
+        selectedIDs.formIntersection(Set(allItems.map(\.id)))
         if let anchor = lastAnchorID, !allItems.contains(where: { $0.id == anchor }) {
             lastAnchorID = selectedIDs.first
         }

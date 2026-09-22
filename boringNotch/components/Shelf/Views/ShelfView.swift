@@ -29,6 +29,10 @@ struct ShelfView: View {
         .onChange(of: selection.selectedIDs) {
             updateQuickLookSelection()
         }
+        .onChange(of: tvm.items) {
+            selection.ensureValidAnchor(in: tvm.items)
+            if tvm.isEmpty { selection.endSelection() }
+        }
         .quickLookPresenter(using: quickLookService)
     }
     
@@ -70,11 +74,67 @@ struct ShelfView: View {
                 content
                     .padding()
             }
+            .overlay(alignment: .topTrailing) {
+                selectionToolbar
+                    .padding(8)
+            }
             .transaction { transaction in
                 transaction.animation = vm.animation
             }
             .contentShape(Rectangle())
             .onTapGesture { selection.clear() }
+    }
+
+    @ViewBuilder
+    private var selectionToolbar: some View {
+        if selection.isSelectionMode {
+            HStack(spacing: 5) {
+                Button(selection.selectedIDs.count == tvm.items.count ? "Clear" : "All") {
+                    if selection.selectedIDs.count == tvm.items.count {
+                        selection.clear()
+                    } else {
+                        selection.selectAll(in: tvm.items)
+                    }
+                }
+
+                Text("\(selection.selectedIDs.count) selected")
+                    .foregroundStyle(.secondary)
+
+                Button {
+                    removeSelectedItems()
+                } label: {
+                    Image(systemName: "trash.fill")
+                        .foregroundStyle(selection.hasSelection ? Color.red : Color.secondary)
+                }
+                .disabled(!selection.hasSelection)
+                .help("Remove selected items from Shelf")
+
+                Button("Done") {
+                    selection.endSelection()
+                }
+            }
+            .font(.system(size: 9, weight: .semibold))
+            .buttonStyle(ShelfSelectionButtonStyle())
+            .padding(3)
+            .background(.black.opacity(0.82), in: Capsule())
+        } else if !tvm.isEmpty {
+            Button {
+                selection.beginSelection()
+            } label: {
+                Image(systemName: "checkmark.circle")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 26, height: 26)
+                    .background(.black.opacity(0.72), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Select multiple Shelf items")
+        }
+    }
+
+    private func removeSelectedItems() {
+        let selectedItems = selection.selectedItems(in: tvm.items)
+        ShelfActionService.remove(selectedItems)
+        selection.endSelection()
     }
 
     var content: some View {
@@ -111,5 +171,15 @@ struct ShelfView: View {
         .onAppear {
             ShelfStateViewModel.shared.cleanupInvalidItems()
         }
+    }
+}
+
+private struct ShelfSelectionButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 9, weight: .semibold))
+            .padding(.horizontal, 7)
+            .frame(height: 22)
+            .background(Color.white.opacity(configuration.isPressed ? 0.16 : 0.09), in: Capsule())
     }
 }

@@ -1,4 +1,16 @@
 -----------------------------------------------------------------------------
+                GNU General Public License Version 3
+        applies to:
+        - Agent hook and session-bridge behavior adapted from Vibe Island
+          (https://github.com/NetVar1337/vibe-island), revision
+          4c6897766828ef903f9dae886c8b2b1e912820eb
+-----------------------------------------------------------------------------
+
+Vibe Island is licensed under the GNU General Public License Version 3.
+This project is distributed under the same license; the complete license text
+is available in the repository's LICENSE file.
+
+-----------------------------------------------------------------------------
                         BSD 3-Clause License
         applies to:
         - MediaRemoteAdapter, Copyright (c) 2025, Jonas van den Berg and contributors

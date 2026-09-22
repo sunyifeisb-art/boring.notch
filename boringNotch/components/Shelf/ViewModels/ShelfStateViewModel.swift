@@ -48,6 +48,13 @@ final class ShelfStateViewModel: ObservableObject {
         items.removeAll { $0.id == item.id }
     }
 
+    func remove(_ selectedItems: [ShelfItem]) {
+        guard !selectedItems.isEmpty else { return }
+        selectedItems.forEach { $0.cleanupStoredData() }
+        let selectedIDs = Set(selectedItems.map(\.id))
+        items.removeAll { selectedIDs.contains($0.id) }
+    }
+
     func updateBookmark(for item: ShelfItem, bookmark: Data) {
         guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
         if case .file = items[idx].kind {

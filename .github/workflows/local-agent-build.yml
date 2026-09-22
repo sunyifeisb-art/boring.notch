@@ -1,0 +1,38 @@
+name: Local Agent Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build unsigned application
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcodebuild \
+            -project boringNotch.xcodeproj \
+            -scheme boringNotch \
+            -configuration Release \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -destination "platform=macOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            DEVELOPMENT_TEAM= \
+            build
+          APP_PATH="$RUNNER_TEMP/DerivedData/Build/Products/Release/boringNotch.app"
+          test -d "$APP_PATH"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" boringNotch-agent-build.zip
+
+      - name: Upload application
+        uses: actions/upload-artifact@v4
+        with:
+          name: boringNotch-agent-build
+          path: boringNotch-agent-build.zip
+          if-no-files-found: error

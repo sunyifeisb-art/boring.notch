@@ -56,6 +56,18 @@ struct ShelfItemView: View {
                         viewModel.handleClick(event: event, view: nsview)
                     }
                 )
+
+                if selection.isSelectionMode {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 17, weight: .semibold))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(isSelected ? Color.white : Color.white.opacity(0.72), Color.accentColor)
+                        .frame(width: 25, height: 25)
+                        .background(.black.opacity(0.45), in: Circle())
+                        .padding(7)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .allowsHitTesting(false)
+                }
             } else {
                 Color.clear
                     .frame(width: 105)

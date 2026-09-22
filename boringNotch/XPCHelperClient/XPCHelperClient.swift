@@ -241,10 +241,101 @@ final class XPCHelperClient: NSObject {
             return false
         }
     }
+
+    // MARK: - AI Agent Bridge
+
+    nonisolated func startAgentBridge() async -> String? {
+        do {
+            let service = await MainActor.run { ensureRemoteService() }
+            let result: NSString? = try await service.withContinuation { service, continuation in
+                service.startAgentBridge { error in
+                    continuation.resume(returning: error)
+                }
+            }
+            return result as String?
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    nonisolated func stopAgentBridge() {
+        Task {
+            let service = await MainActor.run { ensureRemoteService() }
+            try? await service.withService { service in
+                service.stopAgentBridge()
+            }
+        }
+    }
+
+    nonisolated func agentSessionsJSON() async -> Data {
+        do {
+            let service = await MainActor.run { ensureRemoteService() }
+            let result: NSData = try await service.withContinuation { service, continuation in
+                service.agentSessionsJSON { data in
+                    continuation.resume(returning: data)
+                }
+            }
+            return result as Data
+        } catch {
+            return Data("[]".utf8)
+        }
+    }
+
+    nonisolated func respondToAgent(sessionID: String, responseJSON: Data) async -> Bool {
+        do {
+            let service = await MainActor.run { ensureRemoteService() }
+            return try await service.withContinuation { service, continuation in
+                service.respondToAgent(sessionID, responseJSON: responseJSON as NSData) { success in
+                    continuation.resume(returning: success)
+                }
+            }
+        } catch {
+            return false
+        }
+    }
+
+    nonisolated func installAgentHooks() async -> [String] {
+        do {
+            let service = await MainActor.run { ensureRemoteService() }
+            let result: NSArray = try await service.withContinuation { service, continuation in
+                service.installAgentHooks { messages in
+                    continuation.resume(returning: messages)
+                }
+            }
+            return result.compactMap { $0 as? String }
+        } catch {
+            return ["Hook install failed: \(error.localizedDescription)"]
+        }
+    }
+
+    nonisolated func jumpToAgentTerminal(sessionID: String) async -> Bool {
+        do {
+            let service = await MainActor.run { ensureRemoteService() }
+            return try await service.withContinuation { service, continuation in
+                service.jumpToAgentTerminal(sessionID) { success in
+                    continuation.resume(returning: success)
+                }
+            }
+        } catch {
+            return false
+        }
+    }
+
+    nonisolated func sendAgentMessage(sessionID: String?, source: String, cwd: String?, message: String) async -> String? {
+        do {
+            let service = await MainActor.run { ensureRemoteService() }
+            let result: NSString? = try await service.withContinuation { service, continuation in
+                service.sendAgentMessage(sessionID as NSString?, source: source, cwd: cwd as NSString?, message: message) { identifier in
+                    continuation.resume(returning: identifier)
+                }
+            }
+            return result as String?
+        } catch {
+            return nil
+        }
+    }
 }
 
 extension Notification.Name {
     static let accessibilityAuthorizationChanged = Notification.Name("accessibilityAuthorizationChanged")
 }
-
-

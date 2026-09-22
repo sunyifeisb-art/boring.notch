@@ -20,6 +20,14 @@ import Foundation
     func isScreenBrightnessAvailable(with reply: @escaping (Bool) -> Void)
     func currentScreenBrightness(with reply: @escaping (NSNumber?) -> Void)
     func setScreenBrightness(_ value: Float, with reply: @escaping (Bool) -> Void)
+    // AI coding-agent bridge (runs outside the app sandbox)
+    func startAgentBridge(with reply: @escaping (NSString?) -> Void)
+    func stopAgentBridge()
+    func agentSessionsJSON(with reply: @escaping (NSData) -> Void)
+    func respondToAgent(_ sessionID: String, responseJSON: NSData, with reply: @escaping (Bool) -> Void)
+    func installAgentHooks(with reply: @escaping (NSArray) -> Void)
+    func jumpToAgentTerminal(_ sessionID: String, with reply: @escaping (Bool) -> Void)
+    func sendAgentMessage(_ sessionID: NSString?, source: String, cwd: NSString?, message: String, with reply: @escaping (NSString?) -> Void)
 }
 
 /*
