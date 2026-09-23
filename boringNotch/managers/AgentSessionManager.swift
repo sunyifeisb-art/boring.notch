@@ -21,11 +21,24 @@ final class AgentSessionManager: ObservableObject {
     private var attentionSessionIDs = Set<String>()
 
     var attentionSession: AgentSession? {
-        sessions.first(where: { $0.status.needsAttention })
+        agentSessions.first(where: { $0.status.needsAttention })
     }
 
     var activeSessionCount: Int {
-        sessions.filter { $0.status != .completed }.count
+        agentSessions.filter { $0.status != .completed }.count
+    }
+
+    var agentSessions: [AgentSession] {
+        sessions.filter { ["claude", "codex"].contains($0.source.lowercased()) }
+    }
+
+    var claudeSessions: [AgentSession] {
+        sessions.filter { $0.source.lowercased() == "claude" }
+    }
+
+    var hookInstallSummary: String? {
+        guard !hookInstallMessages.isEmpty else { return nil }
+        return hookInstallMessages.joined(separator: "；")
     }
 
     private init() {}
@@ -54,10 +67,12 @@ final class AgentSessionManager: ObservableObject {
         decoder.dateDecodingStrategy = .iso8601
         guard let updatedSessions = try? decoder.decode([AgentSession].self, from: data) else { return }
 
-        let previousActive = Set(sessions.filter { $0.status != .completed }.map(\.id))
-        let updatedActive = Set(updatedSessions.filter { $0.status != .completed }.map(\.id))
+        let previousActive = Set(agentSessions.filter { $0.status != .completed }.map(\.id))
+        let updatedAgentSessions = updatedSessions.filter { ["claude", "codex"].contains($0.source.lowercased()) }
+        let updatedClaudeSessions = updatedAgentSessions.filter { $0.source.lowercased() == "claude" }
+        let updatedActive = Set(updatedAgentSessions.filter { $0.status != .completed }.map(\.id))
         let newActive = updatedActive.subtracting(previousActive)
-        let updatedAttention = Set(updatedSessions.filter { $0.status.needsAttention }.map(\.id))
+        let updatedAttention = Set(updatedAgentSessions.filter { $0.status.needsAttention }.map(\.id))
         let newAttention = updatedAttention.subtracting(attentionSessionIDs)
         sessions = updatedSessions
         attentionSessionIDs = updatedAttention
@@ -70,7 +85,7 @@ final class AgentSessionManager: ObservableObject {
         let autoSelectNewest = UserDefaults.standard.object(forKey: "agentIslandAutoSelectNewest") as? Bool ?? true
         if autoSelectNewest,
            (selectedSessionID == nil || !newActive.isEmpty),
-           let newest = updatedSessions.first(where: { $0.source.lowercased() == "claude" && $0.status != .completed })
+           let newest = updatedClaudeSessions.first(where: { $0.status != .completed })
         {
             selectedSessionID = newest.id
         }

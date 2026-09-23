@@ -8,6 +8,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct AgentSessionsView: View {
+    @EnvironmentObject private var vm: BoringViewModel
     @ObservedObject private var manager = AgentSessionManager.shared
     @State private var draft = ""
     @State private var detailSessionID: String?
@@ -16,7 +17,7 @@ struct AgentSessionsView: View {
     @FocusState private var composerFocused: Bool
 
     private var displayedSessions: [AgentSession] {
-        showCompleted ? manager.sessions : manager.sessions.filter { $0.status != .completed }
+        showCompleted ? manager.agentSessions : manager.agentSessions.filter { $0.status != .completed }
     }
 
     private var selectedClaudeSession: AgentSession? {
@@ -56,11 +57,21 @@ struct AgentSessionsView: View {
                 self.detailSessionID = nil
             }
         }
+        .onChange(of: detailSessionID) { _, identifier in
+            updateNotchSize(hasDetail: identifier != nil)
+        }
         .onChange(of: manager.requestedOpenSessionID) { _, identifier in
             consumeOpenRequest(identifier)
         }
         .onAppear {
             consumeOpenRequest(manager.requestedOpenSessionID)
+            updateNotchSize(hasDetail: detailSessionID != nil)
+        }
+        .onDisappear {
+            guard vm.notchState == .open else { return }
+            withAnimation(.snappy(duration: 0.22)) {
+                vm.notchSize = openNotchSize
+            }
         }
     }
 
@@ -130,7 +141,7 @@ struct AgentSessionsView: View {
                     } else {
                         Image(systemName: "bolt.fill")
                     }
-                    Text(manager.isInstallingHooks ? "安装中" : "安装或修复 Hooks")
+                    Text(manager.isInstallingHooks ? "安装中" : "安装或修复 Agent Hooks")
                 }
                 .font(.system(size: 9, weight: .semibold))
                 .padding(.horizontal, 9)
@@ -147,16 +158,16 @@ struct AgentSessionsView: View {
 
     private var emptyStateDetail: String {
         if let bridgeError = manager.bridgeError { return bridgeError }
-        if let result = manager.hookInstallMessages.last { return result }
-        return !showCompleted && !manager.sessions.isEmpty
+        if let result = manager.hookInstallSummary { return result }
+        return !showCompleted && !manager.agentSessions.isEmpty
             ? "当前没有进行中的任务，可在下方新建 Claude 对话。"
-            : "监控 Claude Code 任务，或在下方发起新对话。"
+            : "Claude Code 与 Codex 连接已就绪，启动任务后会自动显示在这里。"
     }
 
     private func taskDetail(session: AgentSession) -> some View {
         VStack(spacing: 6) {
             detailHeader(session: session)
-                .frame(height: 26)
+                .frame(height: 30)
 
             AgentConversationTimeline(sessionID: session.id)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -167,7 +178,7 @@ struct AgentSessionsView: View {
 
             if session.source.lowercased() == "claude" {
                 claudeComposer(for: session, showsTarget: false)
-                    .frame(height: 32)
+                    .frame(height: 36)
             }
         }
     }
@@ -181,7 +192,7 @@ struct AgentSessionsView: View {
                     Image(systemName: "chevron.left")
                     Text("任务")
                 }
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .frame(height: 24)
                 .padding(.horizontal, 6)
@@ -191,11 +202,11 @@ struct AgentSessionsView: View {
             .help("返回任务列表")
 
             Image(systemName: sourceIcon(for: session.source))
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(session.status.color)
 
             Text(session.displayName)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
 
@@ -212,7 +223,7 @@ struct AgentSessionsView: View {
                         .frame(width: 5, height: 5)
                 }
                 Text(session.status.label)
-                    .font(.system(size: 8, weight: .medium))
+                    .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(session.status.color)
                     .lineLimit(1)
             }
@@ -329,7 +340,7 @@ struct AgentSessionsView: View {
                 }
 
                 Divider()
-                Button("安装或修复 Hooks") { manager.installHooks() }
+                Button("安装或修复 Agent Hooks") { manager.installHooks() }
             } label: {
                 Image(systemName: "chevron.left.forwardslash.chevron.right")
                     .font(.system(size: 10, weight: .semibold))
@@ -369,7 +380,7 @@ struct AgentSessionsView: View {
 
             TextField(composerPlaceholder(for: target), text: $draft)
                 .textFieldStyle(.plain)
-                .font(.system(size: 11))
+                .font(.system(size: 12.5))
                 .focused($composerFocused)
                 .onSubmit {
                     sendDraft(to: target)
@@ -439,6 +450,13 @@ struct AgentSessionsView: View {
         }
     }
 
+    private func updateNotchSize(hasDetail: Bool) {
+        guard vm.notchState == .open else { return }
+        withAnimation(.snappy(duration: 0.22)) {
+            vm.notchSize = hasDetail ? agentDetailNotchSize : openNotchSize
+        }
+    }
+
     private func consumeOpenRequest(_ identifier: String?) {
         guard let identifier,
               let session = manager.sessions.first(where: { $0.id == identifier })
@@ -483,11 +501,11 @@ private struct AgentConversationTimeline: View {
                         systemImage: "bubble.left.and.bubble.right",
                         description: Text(session.detail)
                     )
-                    .font(.system(size: 9))
+                    .font(.system(size: 12))
                 } else {
                     ScrollViewReader { proxy in
                         ScrollView(.vertical, showsIndicators: false) {
-                            LazyVStack(spacing: 6) {
+                            LazyVStack(spacing: 9) {
                                 ForEach(session.messages) { message in
                                     AgentMessageRow(
                                         message: message,
@@ -547,7 +565,7 @@ private struct AgentMessageRow: View {
             HStack {
                 Spacer(minLength: 20)
                 Text(message.text)
-                    .font(.system(size: 8))
+                    .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .textSelection(.enabled)
@@ -561,14 +579,14 @@ private struct AgentMessageRow: View {
                 VStack(alignment: isUser ? .trailing : .leading, spacing: 2) {
                     HStack(spacing: 4) {
                         Text(roleLabel)
-                            .font(.system(size: 7, weight: .semibold))
+                            .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(roleColor)
                         if isStreaming {
                             ProgressView()
                                 .controlSize(.mini)
                                 .scaleEffect(0.6)
                             Text("实时")
-                                .font(.system(size: 7, weight: .medium))
+                                .font(.system(size: 9, weight: .medium))
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -578,9 +596,9 @@ private struct AgentMessageRow: View {
                         isError: isError
                     )
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(bubbleColor, in: RoundedRectangle(cornerRadius: 9))
+                .padding(.horizontal, 11)
+                .padding(.vertical, 8)
+                .background(bubbleColor, in: RoundedRectangle(cornerRadius: 11))
 
                 if !isUser { Spacer(minLength: 52) }
             }
@@ -625,6 +643,7 @@ private struct AgentMarkdownContent: View {
             case quote
             case divider
             case code(language: String?)
+            case table(headers: [String], rows: [[String]])
         }
 
         let id: Int
@@ -648,7 +667,11 @@ private struct AgentMarkdownContent: View {
             result.append(Block(id: result.count, kind: kind, content: content))
         }
 
-        for line in text.components(separatedBy: .newlines) {
+        let sourceLines = text.components(separatedBy: .newlines)
+        var lineIndex = 0
+
+        while lineIndex < sourceLines.count {
+            let line = sourceLines[lineIndex]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("```") {
                 if isCode {
@@ -663,6 +686,22 @@ private struct AgentMarkdownContent: View {
                 }
             } else if isCode {
                 lines.append(line)
+            } else if let headers = tableCells(from: line),
+                      lineIndex + 1 < sourceLines.count,
+                      isTableSeparator(sourceLines[lineIndex + 1], columnCount: headers.count)
+            {
+                appendBlock(kind: .paragraph, lines: &lines)
+                var rows: [[String]] = []
+                lineIndex += 2
+                while lineIndex < sourceLines.count,
+                      let row = tableCells(from: sourceLines[lineIndex]),
+                      row.count == headers.count
+                {
+                    rows.append(row)
+                    lineIndex += 1
+                }
+                appendSingle(kind: .table(headers: headers, rows: rows), content: "")
+                continue
             } else if trimmed.isEmpty {
                 appendBlock(kind: .paragraph, lines: &lines)
             } else if let heading = heading(from: trimmed) {
@@ -686,6 +725,7 @@ private struct AgentMarkdownContent: View {
             } else {
                 lines.append(line)
             }
+            lineIndex += 1
         }
 
         appendBlock(kind: isCode ? .code(language: codeLanguage) : .paragraph, lines: &lines)
@@ -698,7 +738,7 @@ private struct AgentMarkdownContent: View {
                 switch block.kind {
                 case .paragraph:
                     Text(inlineMarkdown: block.content)
-                        .font(.system(size: 9.5))
+                        .font(.system(size: 12.5))
                         .foregroundStyle(isError ? Color.red : Color.primary)
                         .lineSpacing(1.5)
                         .textSelection(.enabled)
@@ -719,7 +759,7 @@ private struct AgentMarkdownContent: View {
                             .fill(Color.white.opacity(0.24))
                             .frame(width: 2)
                         Text(inlineMarkdown: block.content)
-                            .font(.system(size: 9.2))
+                            .font(.system(size: 12))
                             .foregroundStyle(isError ? Color.red : Color.secondary)
                             .italic()
                             .textSelection(.enabled)
@@ -728,6 +768,8 @@ private struct AgentMarkdownContent: View {
                     Divider().opacity(0.25)
                 case .code(let language):
                     codeBlock(block.content, language: language)
+                case .table(let headers, let rows):
+                    markdownTable(headers: headers, rows: rows)
                 }
             }
         }
@@ -759,21 +801,84 @@ private struct AgentMarkdownContent: View {
 
     private func headingSize(_ level: Int) -> CGFloat {
         switch level {
-        case 1: return 13
-        case 2: return 12
-        case 3: return 11
-        default: return 10
+        case 1: return 17
+        case 2: return 15.5
+        case 3: return 14
+        default: return 12.5
+        }
+    }
+
+    private func tableCells(from line: String) -> [String]? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.contains("|") else { return nil }
+        let content = trimmed
+            .trimmingCharacters(in: CharacterSet(charactersIn: "|"))
+        let cells = content
+            .split(separator: "|", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        return cells.count >= 2 ? cells : nil
+    }
+
+    private func isTableSeparator(_ line: String, columnCount: Int) -> Bool {
+        guard let cells = tableCells(from: line), cells.count == columnCount else { return false }
+        return cells.allSatisfy { cell in
+            let marker = cell.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
+            return marker.count >= 3 && marker.allSatisfy { $0 == "-" }
+        }
+    }
+
+    private func markdownTable(headers: [String], rows: [[String]]) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 0) {
+                tableRow(cells: headers, isHeader: true)
+                ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
+                    tableRow(cells: row, isHeader: false, shaded: index.isMultiple(of: 2))
+                }
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+    }
+
+    private func tableRow(cells: [String], isHeader: Bool, shaded: Bool = false) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(Array(cells.enumerated()), id: \.offset) { index, cell in
+                Text(inlineMarkdown: cell)
+                    .font(.system(size: 11.5, weight: isHeader ? .semibold : .regular))
+                    .foregroundStyle(isError ? Color.red : Color.primary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: 150, alignment: .leading)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 7)
+                    .background(isHeader ? Color.white.opacity(0.10) : Color.white.opacity(shaded ? 0.045 : 0.018))
+                    .overlay(alignment: .trailing) {
+                        if index < cells.count - 1 {
+                            Rectangle()
+                                .fill(Color.white.opacity(0.09))
+                                .frame(width: 1)
+                        }
+                    }
+            }
+        }
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.white.opacity(0.09))
+                .frame(height: 1)
         }
     }
 
     private func listRow(marker: String, content: String) -> some View {
         HStack(alignment: .top, spacing: 5) {
             Text(marker)
-                .font(.system(size: 8.5, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 10, alignment: .trailing)
             Text(inlineMarkdown: content)
-                .font(.system(size: 9.5))
+                .font(.system(size: 12.5))
                 .foregroundStyle(isError ? Color.red : Color.primary)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
@@ -784,7 +889,7 @@ private struct AgentMarkdownContent: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
                 Text(language?.uppercased() ?? "代码")
-                    .font(.system(size: 7, weight: .semibold))
+                    .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.secondary)
 
                 Spacer(minLength: 8)
@@ -795,7 +900,7 @@ private struct AgentMarkdownContent: View {
                 } label: {
                     Label("复制", systemImage: "doc.on.doc")
                         .labelStyle(.titleAndIcon)
-                        .font(.system(size: 7, weight: .medium))
+                        .font(.system(size: 9, weight: .medium))
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
@@ -803,7 +908,7 @@ private struct AgentMarkdownContent: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code)
-                    .font(.system(size: 8.5, design: .monospaced))
+                    .font(.system(size: 11.5, design: .monospaced))
                     .foregroundStyle(isError ? Color.red : Color.primary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: true, vertical: true)

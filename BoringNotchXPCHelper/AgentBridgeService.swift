@@ -903,26 +903,12 @@ final class AgentBridgeService {
             try Data(Self.pythonHook.utf8).write(to: hookURL, options: .atomic)
             _ = chmod(hookURL.path, 0o755)
 
-            var results: [String] = []
-            results.append(installClaudeHook(script: hookURL))
-            results.append(installCodexHook(script: hookURL))
-            results.append(installGeminiHook(script: hookURL))
-            results.append(installCursorHook(script: hookURL))
-            results.append(installOpenCodePlugin())
-            results.append(installJavaScriptPlugin(tool: "Amp", directory: ".amp/plugins", fileName: "boring-notch.js", contents: Self.ampPlugin))
-            results.append(installJavaScriptPlugin(tool: "Hermes", directory: ".hermes/plugins", fileName: "boring-notch.js", contents: Self.hermesPlugin))
-            results.append(installKiroHook(script: hookURL))
-            results.append(installKimiHook(script: hookURL))
-            results.append(installSimpleJSONHook(tool: "Droid", directory: ".droid", config: "config.json", key: "boring_notch_hook", source: "droid", script: hookURL))
-            results.append(installSimpleJSONHook(tool: "Windsurf", directory: ".windsurf", config: "settings.json", key: "boring_notch_hook", source: "windsurf", script: hookURL))
-            results.append(installSimpleJSONHook(tool: "CodeBuddy", directory: ".codebuddy", config: "config.json", key: "boring_notch_hook", source: "codebuddy", script: hookURL))
-            results.append(installSimpleJSONHook(tool: "Qoder", directory: ".qoder", config: "config.json", key: "boring_notch_hook", source: "qoder", script: hookURL))
-            results.append(installClineHook(script: hookURL))
-            results.append(installPiHook(script: hookURL))
-            results.append(installCopilotHook(script: hookURL))
-            return results
+            return [
+                installClaudeHook(script: hookURL),
+                installCodexHook(script: hookURL)
+            ]
         } catch {
-            return ["Hook install failed: \(error.localizedDescription)"]
+            return ["Agent Hooks 安装失败：\(error.localizedDescription)"]
         }
     }
 
@@ -1251,8 +1237,8 @@ final class AgentBridgeService {
             }
             root["hooks"] = hooks
             try writeJSONObject(root, to: settingsURL)
-            return "Claude Code: installed"
-        } catch { return "Claude Code: \(error.localizedDescription)" }
+            return "Claude Code Hook 已安装"
+        } catch { return "Claude Code Hook 安装失败：\(error.localizedDescription)" }
     }
 
     private func installCodexHook(script: URL) -> String {
@@ -1266,8 +1252,8 @@ final class AgentBridgeService {
                 "events": ["session.start", "session.end", "tool.start", "tool.end", "permission.request", "turn.end"]
             ]
             try writeJSONObject(root, to: hooksURL)
-            return "Codex: installed"
-        } catch { return "Codex: \(error.localizedDescription)" }
+            return "Codex Hook 已安装"
+        } catch { return "Codex Hook 安装失败：\(error.localizedDescription)" }
     }
 
     private func installGeminiHook(script: URL) -> String {

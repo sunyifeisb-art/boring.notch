@@ -191,7 +191,7 @@ struct AgentSettings: View {
                         .textSelection(.enabled)
                 }
 
-                if let result = manager.hookInstallMessages.last {
+                if let result = manager.hookInstallSummary {
                     Text(result)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -205,7 +205,7 @@ struct AgentSettings: View {
                         if manager.isInstallingHooks {
                             Label("安装中…", systemImage: "hourglass")
                         } else {
-                            Label("安装或修复 Hooks", systemImage: "wrench.and.screwdriver")
+                            Label("安装或修复 Agent Hooks", systemImage: "wrench.and.screwdriver")
                         }
                     }
                     .disabled(!enabled || manager.isInstallingHooks || manager.bridgeError != nil)
