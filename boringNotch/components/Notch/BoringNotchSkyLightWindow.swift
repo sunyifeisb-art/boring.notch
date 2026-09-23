@@ -53,6 +53,7 @@ class BoringNotchSkyLightWindow: NSPanel {
     
     private func configureWindow() {
         isFloatingPanel = true
+        becomesKeyOnlyIfNeeded = true
         isOpaque = false
         titleVisibility = .hidden
         titlebarAppearsTransparent = true
@@ -109,6 +110,9 @@ class BoringNotchSkyLightWindow: NSPanel {
     
     private var observers: Set<AnyCancellable> = []
     
-    override var canBecomeKey: Bool { false }
+    // The agent composer contains a real TextField. A non-activating panel can
+    // still become key without activating the whole app, which lets the user
+    // type into the notch while keeping the current app frontmost.
+    override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 }

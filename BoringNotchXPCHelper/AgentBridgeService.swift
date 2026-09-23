@@ -54,6 +54,7 @@ private struct BridgeHookEvent: Decodable {
     let environment: [String: String]?
     let tty: String?
     let terminalBundleID: String?
+    let transcriptPath: String?
 
     enum CodingKeys: String, CodingKey {
         case sessionID = "session_id"
@@ -68,6 +69,7 @@ private struct BridgeHookEvent: Decodable {
         case environment = "_env"
         case tty = "_tty"
         case terminalBundleID = "terminal_bundle_id"
+        case transcriptPath = "transcript_path"
     }
 }
 
@@ -116,6 +118,15 @@ private struct ClaudeStreamEvent {
     var failed: Bool?
 }
 
+private struct TranscriptState {
+    var path: String
+    var offset: UInt64
+    var remainder = Data()
+    var discardLeadingPartial: Bool
+    var currentClaudeMessageID: String?
+    var currentBridgeMessageID: UUID?
+}
+
 private final class AgentDataCapture: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
@@ -139,6 +150,7 @@ final class AgentBridgeService {
     private var sessions: [String: BridgeSession] = [:]
     private var pendingConnections: [String: Int32] = [:]
     private var runningProcesses: [String: Process] = [:]
+    private var transcriptStates: [String: TranscriptState] = [:]
     private var socketServer: AgentUnixSocketServer?
     private let commandQueue = DispatchQueue(label: "theboringteam.boringnotch.agent-bridge.commands", attributes: .concurrent)
 
@@ -171,11 +183,13 @@ final class AgentBridgeService {
             pendingConnections.removeAll()
             runningProcesses.values.forEach { $0.terminate() }
             runningProcesses.removeAll()
+            transcriptStates.removeAll()
         }
     }
 
     func sessionsJSON() -> Data {
         stateQueue.sync {
+            refreshTranscriptStreamsLocked()
             let staleCutoff = Date().addingTimeInterval(-12 * 60 * 60)
             sessions = sessions.filter { _, session in
                 session.status == .waitingForApproval || session.status == .waitingForAnswer || session.lastActivity > staleCutoff
@@ -449,6 +463,7 @@ final class AgentBridgeService {
         arguments += [
             "--print",
             "--verbose",
+            "--permission-mode", "bypassPermissions",
             "--output-format", "stream-json",
             "--include-partial-messages",
             prompt
@@ -457,6 +472,7 @@ final class AgentBridgeService {
         var environment = ProcessInfo.processInfo.environment
         environment["BORING_NOTCH_MANAGED_SESSION_ID"] = sessionID
         environment["BORING_NOTCH_SOURCE"] = "claude"
+        environment["CLAUDE_BYPASS_PERMISSIONS"] = "1"
         process.environment = environment
 
         if let cwd {
@@ -736,10 +752,15 @@ final class AgentBridgeService {
             session.terminalBundleID = event.terminalBundleID ?? session.terminalBundleID
             session.lastActivity = now
 
+            if !session.isManaged, let transcriptPath = event.transcriptPath, !transcriptPath.isEmpty {
+                self.registerTranscript(path: transcriptPath, sessionID: event.sessionID)
+            }
+
             let eventName = self.normalizedEventName(event.hookEventName)
             var holdsConnection = false
             switch eventName {
             case "SessionEnd":
+                self.transcriptStates.removeValue(forKey: event.sessionID)
                 if session.isManaged {
                     session.status = .idle
                     self.sessions[event.sessionID] = session
@@ -754,6 +775,11 @@ final class AgentBridgeService {
                 self.sessions[event.sessionID] = session
             case "UserPromptSubmit":
                 session.lastUserText = event.prompt
+                if var transcript = self.transcriptStates[event.sessionID] {
+                    transcript.currentClaudeMessageID = nil
+                    transcript.currentBridgeMessageID = nil
+                    self.transcriptStates[event.sessionID] = transcript
+                }
                 if session.status != .waitingForApproval && session.status != .waitingForAnswer {
                     session.status = .inProgress
                 }
@@ -793,6 +819,121 @@ final class AgentBridgeService {
         }
     }
 
+    private func registerTranscript(path: String, sessionID: String) {
+        guard transcriptStates[sessionID]?.path != path else { return }
+        let fileSize = ((try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? NSNumber)?.uint64Value ?? 0
+        let tailWindow: UInt64 = 256 * 1024
+        let startOffset = fileSize > tailWindow ? fileSize - tailWindow : 0
+        transcriptStates[sessionID] = TranscriptState(
+            path: path,
+            offset: startOffset,
+            discardLeadingPartial: startOffset > 0,
+            currentClaudeMessageID: nil,
+            currentBridgeMessageID: nil
+        )
+    }
+
+    private func refreshTranscriptStreamsLocked() {
+        for sessionID in Array(transcriptStates.keys) {
+            guard var state = transcriptStates[sessionID],
+                  var session = sessions[sessionID],
+                  !session.isManaged
+            else { continue }
+
+            let fileSize = ((try? FileManager.default.attributesOfItem(atPath: state.path)[.size]) as? NSNumber)?.uint64Value ?? 0
+            if fileSize < state.offset {
+                state.offset = 0
+                state.remainder.removeAll(keepingCapacity: true)
+                state.discardLeadingPartial = false
+                state.currentClaudeMessageID = nil
+                state.currentBridgeMessageID = nil
+            }
+            guard fileSize > state.offset,
+                  let handle = FileHandle(forReadingAtPath: state.path)
+            else {
+                transcriptStates[sessionID] = state
+                continue
+            }
+
+            do {
+                try handle.seek(toOffset: state.offset)
+            } catch {
+                try? handle.close()
+                transcriptStates[sessionID] = state
+                continue
+            }
+            let newData = handle.readDataToEndOfFile()
+            try? handle.close()
+            state.offset += UInt64(newData.count)
+            guard !newData.isEmpty else {
+                transcriptStates[sessionID] = state
+                continue
+            }
+
+            state.remainder.append(newData)
+            if state.discardLeadingPartial {
+                guard let newline = state.remainder.firstIndex(of: 0x0A) else {
+                    transcriptStates[sessionID] = state
+                    continue
+                }
+                state.remainder.removeSubrange(...newline)
+                state.discardLeadingPartial = false
+            }
+
+            while let newline = state.remainder.firstIndex(of: 0x0A) {
+                let line = Data(state.remainder[..<newline])
+                state.remainder.removeSubrange(...newline)
+                consumeTranscriptLine(line, session: &session, state: &state)
+            }
+
+            sessions[sessionID] = session
+            transcriptStates[sessionID] = state
+        }
+    }
+
+    private func consumeTranscriptLine(_ line: Data, session: inout BridgeSession, state: inout TranscriptState) {
+        guard !line.isEmpty,
+              let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              object["type"] as? String == "assistant",
+              let message = object["message"] as? [String: Any],
+              let content = message["content"] as? [[String: Any]]
+        else { return }
+
+        let text = content.compactMap { block -> String? in
+            guard block["type"] as? String == "text" else { return nil }
+            return block["text"] as? String
+        }.joined()
+        guard !text.isEmpty else { return }
+
+        let claudeMessageID = (message["id"] as? String) ?? (object["uuid"] as? String) ?? UUID().uuidString
+        let bridgeMessageID: UUID
+        if state.currentClaudeMessageID == claudeMessageID,
+           let existingID = state.currentBridgeMessageID,
+           let index = session.messages.firstIndex(where: { $0.id == existingID })
+        {
+            if !session.messages[index].text.hasSuffix(text) {
+                session.messages[index].text += text
+            }
+            bridgeMessageID = existingID
+        } else {
+            bridgeMessageID = UUID()
+            session.messages.append(BridgeMessage(id: bridgeMessageID, role: "assistant", text: text, createdAt: Date()))
+            state.currentClaudeMessageID = claudeMessageID
+            state.currentBridgeMessageID = bridgeMessageID
+        }
+
+        if let index = session.messages.firstIndex(where: { $0.id == bridgeMessageID }) {
+            session.lastAssistantMessage = session.messages[index].text
+        }
+        if session.messages.count > 60 {
+            session.messages.removeFirst(session.messages.count - 60)
+        }
+        if session.status != .waitingForApproval && session.status != .waitingForAnswer {
+            session.status = .inProgress
+        }
+        session.lastActivity = Date()
+    }
+
     private func schedulePermissionTimeout(sessionID: String, descriptor: Int32) {
         stateQueue.asyncAfter(deadline: .now() + 300) { [weak self] in
             guard let self, self.pendingConnections[sessionID] == descriptor else { return }
@@ -827,7 +968,7 @@ final class AgentBridgeService {
             var root = readJSONObject(at: settingsURL)
             var hooks = root["hooks"] as? [String: Any] ?? [:]
             let command = "BORING_NOTCH_SOURCE=claude /usr/bin/python3 \(shellQuoted(script.path))"
-            for event in ["SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop"] {
+            for event in ["SessionStart", "SessionEnd", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "Notification", "Stop"] {
                 var entries = hooks[event] as? [[String: Any]] ?? []
                 let alreadyInstalled = entries.contains { String(describing: $0).contains("BORING_NOTCH_SOURCE=claude") }
                 if !alreadyInstalled {
@@ -1288,14 +1429,10 @@ def main():
     tool_name = data.get("tool_name", data.get("tool", {}).get("name", "") if isinstance(data.get("tool"), dict) else "")
     tool_input = data.get("tool_input", data.get("tool", {}).get("input", {}) if isinstance(data.get("tool"), dict) else {})
 
-    is_question = event_name == "PreToolUse" and tool_name == "AskUserQuestion"
-    bypass = os.environ.get("CLAUDE_BYPASS_PERMISSIONS", "") == "1"
-    is_permission = (
-        event_name == "PermissionRequest" or
-        (source == "claude" and event_name == "PreToolUse" and tool_name not in ("", None, "AskUserQuestion") and not bypass)
-    )
-    if is_question or is_permission:
-        event_name = "PermissionRequest"
+    # PreToolUse is telemetry, not an approval request. Claude Code already
+    # decides whether a tool needs permission according to its permission mode.
+    # Waiting on every PreToolUse created a second, incorrect approval layer.
+    is_permission = event_name == "PermissionRequest"
 
     env = {key: value for key, value in os.environ.items() if key.startswith(("TERM", "TMUX", "SSH_", "COLORTERM", "KITTY_", "WEZTERM_"))}
     payload = {
@@ -1307,13 +1444,35 @@ def main():
         "prompt": data.get("prompt"),
         "last_assistant_message": data.get("last_assistant_message"),
         "codex_title": data.get("title"),
+        "transcript_path": data.get("transcript_path"),
         "_source": source,
         "_tty": get_tty(),
         "_env": env
     }
-    response = send(payload, is_question or is_permission)
-    if response:
-        print(response)
+    response = send(payload, is_permission)
+    if response and is_permission:
+        # The island UI returns a compact decision object. Translate it to the
+        # schema Claude Code requires for a PermissionRequest hook.
+        try:
+            answer = json.loads(response)
+        except Exception:
+            answer = {}
+        decision = answer.get("hookSpecificOutput", {}).get("decision", {})
+        behavior = decision.get("behavior", "deny")
+        if behavior in ("allow", "always"):
+            resolved = {"behavior": "allow"}
+            if behavior == "always":
+                suggestions = data.get("permission_suggestions") or data.get("permissionSuggestions")
+                if suggestions:
+                    resolved["updatedPermissions"] = suggestions
+        else:
+            resolved = {"behavior": "deny", "message": "Denied from Boring Notch"}
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": resolved
+            }
+        }))
 
 if __name__ == "__main__":
     main()

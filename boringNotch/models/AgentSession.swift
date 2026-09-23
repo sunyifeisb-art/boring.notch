@@ -187,7 +187,21 @@ struct AgentSession: Identifiable, Codable, Equatable {
         return source.capitalized
     }
 
+    var liveAssistantText: String? {
+        if let message = messages.last(where: { ($0.role == "assistant" || $0.role == "error") && !$0.text.isEmpty }) {
+            return message.text
+        }
+        if let text = lastAssistantMessage, !text.isEmpty { return text }
+        return nil
+    }
+
     var detail: String {
+        // Claude cards should prioritize the actual streaming reply. Tool names
+        // are useful fallback state, but hiding the reply behind "Bash"/"Read"
+        // makes the island look stuck while Claude is actively answering.
+        if source.lowercased() == "claude", let text = liveAssistantText {
+            return text
+        }
         if let toolName, !toolName.isEmpty {
             let input = toolInput?.displayText ?? ""
             return input.isEmpty ? toolName : "\(toolName) · \(input)"
