@@ -171,6 +171,10 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
         reply(agentBridge.jumpToTerminal(sessionID: sessionID))
     }
 
+    @objc func closeAgentSession(_ sessionID: String, with reply: @escaping (Bool) -> Void) {
+        reply(agentBridge.closeSession(sessionID: sessionID))
+    }
+
     @objc func sendAgentMessage(
         _ sessionID: NSString?,
         source: String,

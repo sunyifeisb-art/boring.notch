@@ -13,6 +13,7 @@ final class AgentSessionManager: ObservableObject {
     @Published private(set) var bridgeError: String?
     @Published private(set) var hookInstallMessages: [String] = []
     @Published private(set) var isInstallingHooks = false
+    @Published private(set) var closingSessionIDs = Set<String>()
     @Published var selectedSessionID: String?
 
     private var pollingTask: Task<Void, Never>?
@@ -114,10 +115,27 @@ final class AgentSessionManager: ObservableObject {
         selectedSessionID = session.id
     }
 
-    func sendMessage(_ text: String, cwd: String? = nil) {
+    func newConversation(cwd: String? = nil, prompt: String? = nil) {
+        let trimmedPrompt = prompt?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let message = trimmedPrompt.map { $0.isEmpty ? "/new" : "/new \($0)" } ?? "/new"
+        Task {
+            let identifier = await XPCHelperClient.shared.sendAgentMessage(
+                sessionID: nil,
+                source: "claude",
+                cwd: cwd,
+                message: message
+            )
+            if let identifier { selectedSessionID = identifier }
+            await refreshSessions()
+        }
+    }
+
+    func sendMessage(_ text: String, to sessionID: String? = nil, cwd: String? = nil) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        let selected = sessions.first(where: { $0.id == selectedSessionID && $0.source.lowercased() == "claude" })
+        let targetID = sessionID ?? selectedSessionID
+        let selected = sessions.first(where: { $0.id == targetID && $0.source.lowercased() == "claude" })
+
         Task {
             let identifier = await XPCHelperClient.shared.sendAgentMessage(
                 sessionID: selected?.id,
@@ -127,6 +145,21 @@ final class AgentSessionManager: ObservableObject {
             )
             if let identifier { selectedSessionID = identifier }
             await refreshSessions()
+        }
+    }
+
+    func close(_ session: AgentSession) {
+        let sessionID = session.id
+        guard !closingSessionIDs.contains(sessionID) else { return }
+        closingSessionIDs.insert(sessionID)
+
+        Task {
+            _ = await XPCHelperClient.shared.closeAgentSession(sessionID: sessionID)
+            await refreshSessions()
+            closingSessionIDs.remove(sessionID)
+            if selectedSessionID == nil {
+                selectedSessionID = sessions.first(where: { $0.source.lowercased() == "claude" })?.id
+            }
         }
     }
 

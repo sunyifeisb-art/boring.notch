@@ -27,5 +27,6 @@ import Foundation
     func respondToAgent(_ sessionID: String, responseJSON: NSData, with reply: @escaping (Bool) -> Void)
     func installAgentHooks(with reply: @escaping (NSArray) -> Void)
     func jumpToAgentTerminal(_ sessionID: String, with reply: @escaping (Bool) -> Void)
+    func closeAgentSession(_ sessionID: String, with reply: @escaping (Bool) -> Void)
     func sendAgentMessage(_ sessionID: NSString?, source: String, cwd: NSString?, message: String, with reply: @escaping (NSString?) -> Void)
 }
