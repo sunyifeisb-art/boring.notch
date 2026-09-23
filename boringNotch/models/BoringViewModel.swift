@@ -189,7 +189,12 @@ class BoringViewModel: NSObject, ObservableObject {
         return false
     }
 
-    func open() {
+    func open(preferredView: NotchViews? = nil) {
+        if let preferredView {
+            coordinator.currentView = preferredView
+        } else {
+            choosePreferredViewForOpen()
+        }
         self.notchSize = openNotchSize
         self.notchState = .open
         
@@ -209,9 +214,17 @@ class BoringViewModel: NSObject, ObservableObject {
         self.coordinator.sneakPeek.show = false
         self.edgeAutoOpenActive = false
 
-        // Set the current view to shelf if it contains files and the user enables openShelfByDefault
-        // Otherwise, if the user has not enabled openLastShelfByDefault, set the view to home
-    if !ShelfStateViewModel.shared.isEmpty && Defaults[.openShelfByDefault] {
+        choosePreferredViewForOpen()
+    }
+
+    private func choosePreferredViewForOpen() {
+        let defaults = UserDefaults.standard
+        let agentEnabled = defaults.object(forKey: "agentIslandEnabled") as? Bool ?? true
+        let agentAutoOpen = defaults.object(forKey: "agentIslandAutoOpen") as? Bool ?? true
+
+        if agentEnabled, agentAutoOpen, AgentSessionManager.shared.activeSessionCount > 0 {
+            coordinator.currentView = .agents
+        } else if !ShelfStateViewModel.shared.isEmpty && Defaults[.openShelfByDefault] {
             coordinator.currentView = .shelf
         } else if !coordinator.openLastTabByDefault {
             coordinator.currentView = .home

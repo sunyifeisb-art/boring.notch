@@ -99,12 +99,12 @@ enum AgentSessionStatus: String, Codable {
 
     var label: String {
         switch self {
-        case .active, .inProgress: return "Working"
-        case .idle: return "Ready"
-        case .pending: return "Pending"
-        case .completed: return "Done"
-        case .waitingForApproval: return "Needs approval"
-        case .waitingForAnswer: return "Needs answer"
+        case .active, .inProgress: return "工作中"
+        case .idle: return "就绪"
+        case .pending: return "等待中"
+        case .completed: return "已完成"
+        case .waitingForApproval: return "等待批准"
+        case .waitingForAnswer: return "等待回答"
         }
     }
 

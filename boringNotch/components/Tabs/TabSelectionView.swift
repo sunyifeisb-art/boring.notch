@@ -15,10 +15,10 @@ struct TabModel: Identifiable {
     let view: NotchViews
 }
 
-let homeTab = TabModel(label: "Home", icon: "house.fill", view: .home)
-let agentsTab = TabModel(label: "Agents", icon: "terminal.fill", view: .agents)
+let homeTab = TabModel(label: "主页", icon: "house.fill", view: .home)
+let agentsTab = TabModel(label: "Agent", icon: "terminal.fill", view: .agents)
 
-let shelfTab = TabModel(label: "Shelf", icon: "tray.fill", view: .shelf)
+let shelfTab = TabModel(label: "文件", icon: "tray.fill", view: .shelf)
 
 struct TabSelectionView: View {
     @ObservedObject var coordinator = BoringViewCoordinator.shared
@@ -27,8 +27,10 @@ struct TabSelectionView: View {
     @Namespace var animation
 
     private var tabs: [TabModel] {
-        var items = boringShelf ? [homeTab, shelfTab] : [homeTab]
+        var items = [homeTab]
+        // Agent 任务入口优先，文件存储器作为第二入口，保持用户处理任务时的路径最短。
         if agentIslandEnabled { items.append(agentsTab) }
+        if boringShelf { items.append(shelfTab) }
         return items
     }
 

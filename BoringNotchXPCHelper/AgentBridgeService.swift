@@ -83,6 +83,17 @@ private enum BridgeSessionStatus: String, Codable {
     case completed
     case waitingForApproval = "waiting_for_approval"
     case waitingForAnswer = "waiting_for_answer"
+
+    var localizedLabel: String {
+        switch self {
+        case .active, .inProgress: return "工作中"
+        case .idle: return "就绪"
+        case .pending: return "等待中"
+        case .completed: return "已完成"
+        case .waitingForApproval: return "等待批准"
+        case .waitingForAnswer: return "等待回答"
+        }
+    }
 }
 
 private struct BridgeSession: Codable {
@@ -260,6 +271,10 @@ final class AgentBridgeService {
             _ = focusTMUXPane(tty: tty)
         }
 
+        if termProgram.contains("ghostty") || session.terminalBundleID == "com.mitchellh.ghostty" {
+            return focusGhosttyTerminal(sessionID: sessionID, session: session)
+        }
+
         if let paneID = session.environment["WEZTERM_PANE"],
            let wezterm = executableURL(named: "wezterm"),
            run(wezterm.path, arguments: ["cli", "activate-pane", "--pane-id", paneID])
@@ -318,6 +333,49 @@ final class AgentBridgeService {
         return run("/usr/bin/open", arguments: ["-b", bundleID])
     }
 
+    private func focusGhosttyTerminal(sessionID: String, session: BridgeSession) -> Bool {
+        let terminalID = session.ghosttyTerminalID ?? ""
+        let cwd = session.cwd ?? ""
+        guard !terminalID.isEmpty || !cwd.isEmpty else { return false }
+
+        let script = #"""
+        on run argv
+            set targetID to item 1 of argv
+            set targetCWD to item 2 of argv
+
+            tell application "Ghostty"
+                set targetTerm to missing value
+                if targetID is not "" then
+                    try
+                        set targetTerm to terminal id targetID
+                    end try
+                end if
+
+                if targetTerm is missing value and targetCWD is not "" then
+                    set matches to every terminal whose working directory is targetCWD
+                    if (count of matches) is 1 then set targetTerm to item 1 of matches
+                end if
+
+                if targetTerm is missing value then error "Claude terminal is ambiguous or unavailable"
+                activate
+                focus targetTerm
+                return id of targetTerm
+            end tell
+        end run
+        """#
+
+        guard let resolvedID = runText("/usr/bin/osascript", arguments: ["-e", script, "--", terminalID, cwd]),
+              !resolvedID.isEmpty
+        else { return false }
+
+        stateQueue.async { [weak self] in
+            guard let self, var updated = self.sessions[sessionID] else { return }
+            updated.ghosttyTerminalID = resolvedID
+            self.sessions[sessionID] = updated
+        }
+        return true
+    }
+
     func sendMessage(sessionID: String?, source: String, cwd: String?, message: String) -> String? {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -331,7 +389,7 @@ final class AgentBridgeService {
 
             guard resolvedSource == "claude" else {
                 if let sessionID {
-                    appendSystemMessage("Direct chat is available for Claude Code sessions.", to: sessionID, status: existing?.status ?? .idle)
+                    appendSystemMessage("仅 Claude Code 会话支持直接对话。", to: sessionID, status: existing?.status ?? .idle)
                     return sessionID
                 }
                 return nil
@@ -344,21 +402,29 @@ final class AgentBridgeService {
                 }
                 runningProcesses[sessionID]?.terminate()
                 runningProcesses.removeValue(forKey: sessionID)
-                appendSystemMessage("Stopped the current agent run.", to: sessionID, status: .idle)
+                appendSystemMessage("已停止当前运行。", to: sessionID, status: .idle)
                 return sessionID
             }
 
             if trimmed == "/current", let sessionID, let session = sessions[sessionID] {
-                let summary = "\(session.source.capitalized) · \(session.status.rawValue) · \(session.cwd ?? "No working directory")"
+                let summary = "\(session.source.capitalized) · \(session.status.localizedLabel) · \(session.cwd ?? "未设置工作目录")"
                 appendSystemMessage(summary, to: sessionID, status: session.status)
                 return sessionID
             }
 
             if trimmed == "/history", let sessionID, let session = sessions[sessionID] {
                 let history = session.messages.suffix(6).map { message in
-                    "\(message.role.capitalized): \(message.text)"
+                    let role: String
+                    switch message.role {
+                    case "user": role = "我"
+                    case "assistant": role = "Claude"
+                    case "system": role = "系统"
+                    case "error": role = "错误"
+                    default: role = message.role
+                    }
+                    return "\(role)：\(message.text)"
                 }.joined(separator: "\n")
-                appendSystemMessage(history.isEmpty ? "No conversation history yet." : history, to: sessionID, status: session.status)
+                appendSystemMessage(history.isEmpty ? "暂无对话记录。" : history, to: sessionID, status: session.status)
                 return sessionID
             }
 
@@ -367,9 +433,9 @@ final class AgentBridgeService {
                     .filter { $0.source == "claude" }
                     .sorted { $0.lastActivity > $1.lastActivity }
                     .enumerated()
-                    .map { index, item in "\(index + 1). \(item.title ?? item.cwd ?? item.id) [\(item.status.rawValue)]" }
+                    .map { index, item in "\(index + 1). \(item.title ?? item.cwd ?? item.id) [\(item.status.localizedLabel)]" }
                     .joined(separator: "\n")
-                appendSystemMessage(available.isEmpty ? "No Claude sessions." : available, to: sessionID, status: sessions[sessionID]?.status ?? .idle)
+                appendSystemMessage(available.isEmpty ? "暂无 Claude 会话。" : available, to: sessionID, status: sessions[sessionID]?.status ?? .idle)
                 return sessionID
             }
 
@@ -385,18 +451,18 @@ final class AgentBridgeService {
                     target = available.first { $0.id == selector || $0.resumeID == selector }
                 }
                 if let target {
-                    appendSystemMessage("Switched to \(target.title ?? target.cwd ?? target.id).", to: target.id, status: target.status)
+                    appendSystemMessage("已切换到 \(target.title ?? target.cwd ?? target.id)。", to: target.id, status: target.status)
                     return target.id
                 }
                 if let sessionID {
-                    appendSystemMessage("Claude session not found: \(selector)", to: sessionID, status: sessions[sessionID]?.status ?? .idle)
+                    appendSystemMessage("未找到 Claude 会话：\(selector)", to: sessionID, status: sessions[sessionID]?.status ?? .idle)
                     return sessionID
                 }
                 return nil
             }
 
             if trimmed == "/help", let sessionID {
-                appendSystemMessage("Commands: /new [prompt], /clear, /stop, /current, /list, /switch <number|id>, /history, /compact, /dir <path>, /help", to: sessionID, status: sessions[sessionID]?.status ?? .idle)
+                appendSystemMessage("可用命令：/new [提示词]、/clear、/stop、/current、/list、/switch <序号或 ID>、/history、/compact、/dir <路径>、/help", to: sessionID, status: sessions[sessionID]?.status ?? .idle)
                 return sessionID
             }
 
@@ -407,9 +473,9 @@ final class AgentBridgeService {
                 var isDirectory: ObjCBool = false
                 if FileManager.default.fileExists(atPath: target.path, isDirectory: &isDirectory), isDirectory.boolValue {
                     sessions[sessionID]?.cwd = target.path
-                    appendSystemMessage("Working directory changed to \(target.path).", to: sessionID, status: .idle)
+                    appendSystemMessage("工作目录已切换到 \(target.path)。", to: sessionID, status: .idle)
                 } else {
-                    appendSystemMessage("Directory does not exist: \(target.path)", to: sessionID, status: sessions[sessionID]?.status ?? .idle)
+                    appendSystemMessage("目录不存在：\(target.path)", to: sessionID, status: sessions[sessionID]?.status ?? .idle)
                 }
                 return sessionID
             }
@@ -451,7 +517,7 @@ final class AgentBridgeService {
                     lastAssistantMessage: nil,
                     toolName: nil,
                     toolInput: nil,
-                    title: prompt.isEmpty ? "New \(resolvedSource.capitalized) session" : String(prompt.prefix(42)),
+                    title: prompt.isEmpty ? "新建 \(resolvedSource.capitalized) 会话" : String(prompt.prefix(42)),
                     environment: [:],
                     tty: nil,
                     terminalBundleID: nil,
@@ -489,7 +555,7 @@ final class AgentBridgeService {
                 ) {
                     self.stateQueue.async {
                         self.appendSystemMessage(
-                            "Could not reach the matching Ghostty Claude session. Allow Automation access to Ghostty or reopen the Claude session, then try again.",
+                            "无法连接对应的 Ghostty Claude 会话。请允许 Boring Notch 自动化控制 Ghostty，或重新打开 Claude 会话后再试。",
                             to: terminalRequest.id,
                             status: .idle
                         )
@@ -515,7 +581,7 @@ final class AgentBridgeService {
         guard let executable = executableURL(named: "claude") else {
             completeAgentRun(
                 sessionID: sessionID,
-                response: "Claude Code was not found. Install it or make the `claude` executable available in a standard bin directory.",
+                response: "未找到 Claude Code。请安装 Claude Code，或将 `claude` 可执行文件放到标准可执行目录。",
                 resumeID: nil,
                 failed: true
             )
@@ -672,12 +738,12 @@ final class AgentBridgeService {
                 if let cleaned, !cleaned.isEmpty {
                     session.messages[index].text = cleaned
                 } else if session.messages[index].text.isEmpty {
-                    session.messages[index].text = failed ? "Claude Code stopped with an error." : "No response"
+                    session.messages[index].text = failed ? "Claude Code 因错误停止。" : "Claude 未返回内容"
                 }
                 session.messages[index].role = failed ? "error" : "assistant"
                 session.lastAssistantMessage = session.messages[index].text
             } else {
-                let text = (cleaned?.isEmpty == false ? cleaned : nil) ?? (failed ? "Claude Code stopped with an error." : "No response")
+                let text = (cleaned?.isEmpty == false ? cleaned : nil) ?? (failed ? "Claude Code 因错误停止。" : "Claude 未返回内容")
                 session.messages.append(
                     BridgeMessage(id: UUID(), role: failed ? "error" : "assistant", text: text, createdAt: Date())
                 )

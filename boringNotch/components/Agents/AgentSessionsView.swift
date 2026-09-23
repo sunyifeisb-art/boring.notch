@@ -3,6 +3,7 @@
 //  boringNotch
 //
 
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -11,10 +12,15 @@ struct AgentSessionsView: View {
     @State private var draft = ""
     @State private var detailSessionID: String?
     @State private var showsDirectoryPicker = false
+    @AppStorage("agentIslandShowCompleted") private var showCompleted = true
     @FocusState private var composerFocused: Bool
 
+    private var displayedSessions: [AgentSession] {
+        showCompleted ? manager.sessions : manager.sessions.filter { $0.status != .completed }
+    }
+
     private var selectedClaudeSession: AgentSession? {
-        manager.sessions.first {
+        displayedSessions.first {
             $0.id == manager.selectedSessionID && $0.source.lowercased() == "claude"
         }
     }
@@ -50,6 +56,12 @@ struct AgentSessionsView: View {
                 self.detailSessionID = nil
             }
         }
+        .onChange(of: manager.requestedOpenSessionID) { _, identifier in
+            consumeOpenRequest(identifier)
+        }
+        .onAppear {
+            consumeOpenRequest(manager.requestedOpenSessionID)
+        }
     }
 
     private var taskList: some View {
@@ -64,12 +76,12 @@ struct AgentSessionsView: View {
 
     @ViewBuilder
     private var sessionStrip: some View {
-        if manager.sessions.isEmpty {
+        if displayedSessions.isEmpty {
             emptyState
         } else {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    ForEach(manager.sessions) { session in
+                    ForEach(displayedSessions) { session in
                         AgentSessionCard(
                             session: session,
                             isSelected: manager.selectedSessionID == session.id,
@@ -98,7 +110,7 @@ struct AgentSessionsView: View {
                 .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(manager.bridgeError == nil ? "Agent center" : "Agent bridge unavailable")
+                Text(manager.bridgeError == nil ? "Agent 中心" : "Agent 桥接不可用")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.white)
                 Text(emptyStateDetail)
@@ -118,7 +130,7 @@ struct AgentSessionsView: View {
                     } else {
                         Image(systemName: "bolt.fill")
                     }
-                    Text(manager.isInstallingHooks ? "Installing" : "Install hooks")
+                    Text(manager.isInstallingHooks ? "安装中" : "安装或修复 Hooks")
                 }
                 .font(.system(size: 9, weight: .semibold))
                 .padding(.horizontal, 9)
@@ -136,7 +148,9 @@ struct AgentSessionsView: View {
     private var emptyStateDetail: String {
         if let bridgeError = manager.bridgeError { return bridgeError }
         if let result = manager.hookInstallMessages.last { return result }
-        return "Monitor Claude Code tasks or start a new conversation below."
+        return !showCompleted && !manager.sessions.isEmpty
+            ? "当前没有进行中的任务，可在下方新建 Claude 对话。"
+            : "监控 Claude Code 任务，或在下方发起新对话。"
     }
 
     private func taskDetail(session: AgentSession) -> some View {
@@ -165,7 +179,7 @@ struct AgentSessionsView: View {
             } label: {
                 HStack(spacing: 3) {
                     Image(systemName: "chevron.left")
-                    Text("Tasks")
+                    Text("任务")
                 }
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(.secondary)
@@ -174,7 +188,7 @@ struct AgentSessionsView: View {
                 .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 7))
             }
             .buttonStyle(.plain)
-            .help("Back to task list")
+            .help("返回任务列表")
 
             Image(systemName: sourceIcon(for: session.source))
                 .font(.system(size: 10, weight: .semibold))
@@ -213,7 +227,7 @@ struct AgentSessionsView: View {
                         .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(.plain)
-                .help("Open this Claude task in its terminal")
+                .help("在 Ghostty 中打开这个 Claude Code 对话")
             }
 
             Button {
@@ -234,8 +248,8 @@ struct AgentSessionsView: View {
             .disabled(manager.closingSessionIDs.contains(session.id))
             .help(
                 session.isManaged
-                    ? "Close this task and stop its managed Claude process"
-                    : "Remove this task from Agent center; the terminal Claude process keeps running"
+                    ? "关闭任务并停止由灵动岛启动的 Claude 进程"
+                    : "从 Agent 中心移除任务；终端中的 Claude 会继续运行"
             )
         }
         .padding(.horizontal, 2)
@@ -249,7 +263,7 @@ struct AgentSessionsView: View {
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(session.status.color)
 
-                Text(session.questionTitle ?? "Claude needs an answer")
+                Text(session.questionTitle ?? "Claude 正在等待回答")
                     .font(.system(size: 9, weight: .medium))
                     .lineLimit(1)
 
@@ -325,7 +339,7 @@ struct AgentSessionsView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .help("Claude Code commands")
+            .help("Claude Code 命令")
 
             if showsTarget {
                 if let target {
@@ -344,9 +358,9 @@ struct AgentSessionsView: View {
                         .frame(maxWidth: 92)
                     }
                     .buttonStyle(.plain)
-                    .help("Open current task")
+                    .help("打开当前任务")
                 } else {
-                    Text("New Claude")
+                    Text("新建 Claude")
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -372,7 +386,7 @@ struct AgentSessionsView: View {
             }
             .buttonStyle(.plain)
             .disabled(!canSend)
-            .help(target == nil ? "Start a Claude Code conversation" : "Send to this Claude Code task")
+            .help(target == nil ? "发起 Claude Code 对话" : "发送到这个 Claude Code 任务")
         }
         .padding(.horizontal, 4)
         .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
@@ -383,8 +397,8 @@ struct AgentSessionsView: View {
     }
 
     private func composerPlaceholder(for target: AgentSession?) -> String {
-        if target?.status == .waitingForAnswer { return "Answer Claude…" }
-        return target == nil ? "Start Claude Code…" : "Message this task…"
+        if target?.status == .waitingForAnswer { return "回复 Claude…" }
+        return target == nil ? "发起 Claude Code 对话…" : "给当前任务发送消息…"
     }
 
     private func sendDraft(to target: AgentSession?) {
@@ -425,6 +439,14 @@ struct AgentSessionsView: View {
         }
     }
 
+    private func consumeOpenRequest(_ identifier: String?) {
+        guard let identifier,
+              let session = manager.sessions.first(where: { $0.id == identifier })
+        else { return }
+        openSession(session)
+        manager.requestedOpenSessionID = nil
+    }
+
     private func closeSession(_ session: AgentSession) {
         if detailSessionID == session.id {
             detailSessionID = nil
@@ -457,7 +479,7 @@ private struct AgentConversationTimeline: View {
             if let session {
                 if session.messages.isEmpty {
                     ContentUnavailableView(
-                        "No messages yet",
+                        "暂无消息",
                         systemImage: "bubble.left.and.bubble.right",
                         description: Text(session.detail)
                     )
@@ -492,7 +514,7 @@ private struct AgentConversationTimeline: View {
                 }
             } else {
                 ContentUnavailableView(
-                    "Task unavailable",
+                    "任务不可用",
                     systemImage: "bubble.left.and.exclamationmark.bubble.right"
                 )
             }
@@ -545,17 +567,16 @@ private struct AgentMessageRow: View {
                             ProgressView()
                                 .controlSize(.mini)
                                 .scaleEffect(0.6)
-                            Text("Live")
+                            Text("实时")
                                 .font(.system(size: 7, weight: .medium))
                                 .foregroundStyle(.secondary)
                         }
                     }
 
-                    Text(message.text.isEmpty ? "…" : message.text)
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(isError ? Color.red : Color.primary)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
+                    AgentMarkdownContent(
+                        text: message.text.isEmpty ? "…" : message.text,
+                        isError: isError
+                    )
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
@@ -588,6 +609,126 @@ private struct AgentMessageRow: View {
         if isUser { return Color.blue.opacity(0.13) }
         if isError { return Color.red.opacity(0.09) }
         return Color.white.opacity(0.055)
+    }
+}
+
+private struct AgentMarkdownContent: View {
+    let text: String
+    let isError: Bool
+
+    private struct Block: Identifiable {
+        enum Kind {
+            case markdown
+            case code(language: String?)
+        }
+
+        let id: Int
+        let kind: Kind
+        let content: String
+    }
+
+    private var blocks: [Block] {
+        var result: [Block] = []
+        var lines: [String] = []
+        var codeLanguage: String?
+        var isCode = false
+
+        func appendBlock(kind: Block.Kind, lines: inout [String]) {
+            guard !lines.isEmpty else { return }
+            result.append(Block(id: result.count, kind: kind, content: lines.joined(separator: "\n")))
+            lines.removeAll(keepingCapacity: true)
+        }
+
+        for line in text.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                if isCode {
+                    appendBlock(kind: .code(language: codeLanguage), lines: &lines)
+                    isCode = false
+                    codeLanguage = nil
+                } else {
+                    appendBlock(kind: .markdown, lines: &lines)
+                    isCode = true
+                    let language = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                    codeLanguage = language.isEmpty ? nil : language
+                }
+            } else {
+                lines.append(line)
+            }
+        }
+
+        appendBlock(kind: isCode ? .code(language: codeLanguage) : .markdown, lines: &lines)
+        return result
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(blocks) { block in
+                switch block.kind {
+                case .markdown:
+                    Text(markdown: block.content)
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(isError ? Color.red : Color.primary)
+                        .lineSpacing(1.5)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .code(let language):
+                    codeBlock(block.content, language: language)
+                }
+            }
+        }
+    }
+
+    private func codeBlock(_ code: String, language: String?) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 5) {
+                Text(language?.uppercased() ?? "代码")
+                    .font(.system(size: 7, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 8)
+
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(code, forType: .string)
+                } label: {
+                    Label("复制", systemImage: "doc.on.doc")
+                        .labelStyle(.titleAndIcon)
+                        .font(.system(size: 7, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(code)
+                    .font(.system(size: 8.5, design: .monospaced))
+                    .foregroundStyle(isError ? Color.red : Color.primary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: true, vertical: true)
+            }
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .background(Color.black.opacity(0.36), in: RoundedRectangle(cornerRadius: 7))
+        .overlay {
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(Color.white.opacity(0.06), lineWidth: 1)
+        }
+    }
+}
+
+private extension Text {
+    init(markdown source: String) {
+        let options = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .full,
+            failurePolicy: .returnPartiallyParsedIfPossible
+        )
+        if let attributed = try? AttributedString(markdown: source, options: options) {
+            self.init(attributed)
+        } else {
+            self.init(source)
+        }
     }
 }
 
@@ -628,7 +769,7 @@ private struct AgentSessionCard: View {
                             .frame(width: 5, height: 5)
                     }
 
-                    Text(isClosing ? "Closing" : session.status.label)
+                    Text(isClosing ? "关闭中" : session.status.label)
                         .font(.system(size: 8, weight: .medium))
                         .foregroundStyle(isClosing ? Color.secondary : session.status.color)
                         .lineLimit(1)
@@ -650,14 +791,14 @@ private struct AgentSessionCard: View {
                         Image(systemName: session.status == .waitingForAnswer ? "questionmark.bubble.fill" : "hand.raised.fill")
                             .font(.system(size: 8, weight: .semibold))
                             .foregroundStyle(session.status.color)
-                        Text("Open to respond")
+                        Text("打开处理")
                             .font(.system(size: 8, weight: .medium))
                             .foregroundStyle(session.status.color)
                     } else if session.source.lowercased() == "claude" {
                         Image(systemName: "bubble.left.and.bubble.right.fill")
                             .font(.system(size: 7))
                             .foregroundStyle(.tertiary)
-                        Text("\(session.messages.count) messages")
+                        Text("\(session.messages.count) 条消息")
                             .font(.system(size: 8))
                             .foregroundStyle(.tertiary)
                     }
@@ -687,7 +828,7 @@ private struct AgentSessionCard: View {
         }
         .buttonStyle(.plain)
         .disabled(isClosing)
-        .help(session.source.lowercased() == "claude" ? "Open live Claude conversation" : "Open task details")
+        .help(session.source.lowercased() == "claude" ? "打开 Claude 实时对话" : "打开任务详情")
         .contextMenu {
             Button {
                 onOpen()
@@ -696,11 +837,42 @@ private struct AgentSessionCard: View {
             }
 
             if session.source.lowercased() == "claude" {
-                Button {
-                    AgentSessionManager.shared.jumpToTerminal(session)
-                } label: {
-                    Label("打开 Claude Code", systemImage: "terminal")
+                if !session.isManaged {
+                    Button {
+                        AgentSessionManager.shared.jumpToTerminal(session)
+                    } label: {
+                        Label("在 Ghostty 中打开", systemImage: "terminal")
+                    }
                 }
+
+                if session.status == .active || session.status == .inProgress {
+                    Button {
+                        AgentSessionManager.shared.sendMessage("/stop", to: session.id)
+                    } label: {
+                        Label("停止当前运行", systemImage: "stop.circle")
+                    }
+                }
+            }
+
+            if let cwd = session.cwd, !cwd.isEmpty {
+                Button {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: cwd))
+                } label: {
+                    Label("打开工作目录", systemImage: "folder")
+                }
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(cwd, forType: .string)
+                } label: {
+                    Label("复制工作目录", systemImage: "doc.on.doc")
+                }
+            }
+
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(session.id, forType: .string)
+            } label: {
+                Label("复制会话 ID", systemImage: "number")
             }
 
             Divider()
@@ -741,7 +913,7 @@ private struct NewClaudeTaskButton: View {
                     .font(.system(size: 12, weight: .semibold))
                     .frame(width: 24, height: 24)
                     .background(Color.white.opacity(0.08), in: Circle())
-                Text("New")
+                Text("新建")
                     .font(.system(size: 8, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
@@ -753,7 +925,7 @@ private struct NewClaudeTaskButton: View {
             }
         }
         .buttonStyle(.plain)
-        .help("Start a new Claude Code task")
+        .help("新建 Claude Code 任务")
     }
 }
 

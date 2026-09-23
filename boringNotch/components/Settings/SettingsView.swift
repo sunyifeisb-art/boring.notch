@@ -133,9 +133,12 @@ struct SettingsView: View {
 }
 
 struct AgentSettings: View {
+    @ObservedObject private var manager = AgentSessionManager.shared
     @AppStorage("agentIslandEnabled") private var enabled = true
     @AppStorage("agentIslandAutoOpen") private var autoOpen = true
     @AppStorage("agentIslandShowNotifications") private var showNotifications = true
+    @AppStorage("agentIslandAutoSelectNewest") private var autoSelectNewest = true
+    @AppStorage("agentIslandShowCompleted") private var showCompleted = true
 
     var body: some View {
         Form {
@@ -151,9 +154,13 @@ struct AgentSettings: View {
                             }
                         }
                     }
-                Toggle("有任务时自动切换到 Agent", isOn: $autoOpen)
+                Toggle("新任务出现时自动打开 Agent", isOn: $autoOpen)
                     .disabled(!enabled)
-                Toggle("显示任务状态提醒", isOn: $showNotifications)
+                Toggle("在收起状态显示待处理提醒", isOn: $showNotifications)
+                    .disabled(!enabled)
+                Toggle("自动选中最近活跃任务", isOn: $autoSelectNewest)
+                    .disabled(!enabled)
+                Toggle("在任务列表显示已完成任务", isOn: $showCompleted)
                     .disabled(!enabled)
             }
 
@@ -162,8 +169,56 @@ struct AgentSettings: View {
                 Text("关闭外部 Claude 任务只会从灵动岛移除，不会关闭终端中的 Claude 会话。")
                     .foregroundStyle(.secondary)
             }
+
+            Section("Claude Code 连接") {
+                LabeledContent("连接状态") {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(manager.bridgeError == nil ? Color.green : Color.orange)
+                            .frame(width: 7, height: 7)
+                        Text(manager.bridgeError == nil ? "已连接" : "不可用")
+                    }
+                }
+
+                LabeledContent("当前任务") {
+                    Text("\(manager.activeSessionCount) 个")
+                }
+
+                if let error = manager.bridgeError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                }
+
+                if let result = manager.hookInstallMessages.last {
+                    Text(result)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+
+                HStack {
+                    Button {
+                        manager.installHooks()
+                    } label: {
+                        if manager.isInstallingHooks {
+                            Label("安装中…", systemImage: "hourglass")
+                        } else {
+                            Label("安装或修复 Hooks", systemImage: "wrench.and.screwdriver")
+                        }
+                    }
+                    .disabled(!enabled || manager.isInstallingHooks || manager.bridgeError != nil)
+
+                    Button("立即刷新") {
+                        Task { await manager.refreshSessions() }
+                    }
+                    .disabled(!enabled || manager.bridgeError != nil)
+                }
+            }
         }
         .formStyle(.grouped)
+        .navigationTitle("Agent 灵动岛")
     }
 }
 

@@ -6,6 +6,7 @@
 //  Modified by Richard Kunkli on 24/08/2024.
 //
 
+import AppKit
 import AVFoundation
 import Combine
 import Defaults
@@ -85,6 +86,15 @@ struct ContentView: View {
         }
 
         return chinWidth
+    }
+
+    private var contextAgentSession: AgentSession? {
+        if let selectedID = agentManager.selectedSessionID,
+           let selected = agentManager.sessions.first(where: { $0.id == selectedID })
+        {
+            return selected
+        }
+        return agentManager.sessions.first(where: { $0.status != .completed }) ?? agentManager.sessions.first
     }
 
     var body: some View {
@@ -190,7 +200,72 @@ struct ContentView: View {
                     }
                     .sensoryFeedback(.alignment, trigger: haptics)
                     .contextMenu {
-                        Button("Settings") {
+                        if agentIslandEnabled, let session = contextAgentSession {
+                            Button {
+                                agentManager.requestOpen(session)
+                                vm.open(preferredView: .agents)
+                            } label: {
+                                Label("打开任务对话", systemImage: "bubble.left.and.bubble.right")
+                            }
+
+                            if !session.isManaged {
+                                Button {
+                                    agentManager.jumpToTerminal(session)
+                                } label: {
+                                    Label("在 Ghostty 中打开", systemImage: "terminal")
+                                }
+                            }
+
+                            if session.status == .active || session.status == .inProgress {
+                                Button {
+                                    agentManager.sendMessage("/stop", to: session.id)
+                                } label: {
+                                    Label("停止当前运行", systemImage: "stop.circle")
+                                }
+                            }
+
+                            if let cwd = session.cwd, !cwd.isEmpty {
+                                Button {
+                                    NSWorkspace.shared.open(URL(fileURLWithPath: cwd))
+                                } label: {
+                                    Label("打开工作目录", systemImage: "folder")
+                                }
+                            }
+
+                            Button(role: .destructive) {
+                                agentManager.close(session)
+                            } label: {
+                                Label("关闭任务窗口", systemImage: "xmark.circle")
+                            }
+
+                            Divider()
+                        }
+
+                        Button {
+                            vm.open(preferredView: .home)
+                        } label: {
+                            Label("打开主页", systemImage: "house")
+                        }
+
+                        if agentIslandEnabled {
+                            Button {
+                                vm.open(preferredView: .agents)
+                            } label: {
+                                Label("打开 Agent 中心", systemImage: "terminal")
+                            }
+                        }
+
+                        if Defaults[.boringShelf] {
+                            Button {
+                                vm.open(preferredView: .shelf)
+                            } label: {
+                                Label("打开文件存储器", systemImage: "tray")
+                            }
+                        }
+
+                        Divider()
+
+                        Button("设置") {
                             DispatchQueue.main.async {
                                 SettingsWindowController.shared.showWindow()
                             }
@@ -226,8 +301,7 @@ struct ContentView: View {
 
             if isTargeted {
                 if vm.notchState == .closed {
-                    coordinator.currentView = .shelf
-                    doOpen()
+                    doOpen(preferredView: .shelf)
                 }
                 return
             }
@@ -516,9 +590,9 @@ struct ContentView: View {
         }
     }
 
-    private func doOpen() {
+    private func doOpen(preferredView: NotchViews? = nil) {
         withAnimation(animationSpring) {
-            vm.open()
+            vm.open(preferredView: preferredView)
         }
     }
 

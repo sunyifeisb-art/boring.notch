@@ -89,7 +89,7 @@ struct ShelfView: View {
     private var selectionToolbar: some View {
         if selection.isSelectionMode {
             HStack(spacing: 5) {
-                Button(selection.selectedIDs.count == tvm.items.count ? "Clear" : "All") {
+                Button(selection.selectedIDs.count == tvm.items.count ? "清空选择" : "全选") {
                     if selection.selectedIDs.count == tvm.items.count {
                         selection.clear()
                     } else {
@@ -97,7 +97,7 @@ struct ShelfView: View {
                     }
                 }
 
-                Text("\(selection.selectedIDs.count) selected")
+                Text("已选 \(selection.selectedIDs.count) 项")
                     .foregroundStyle(.secondary)
 
                 Button {
@@ -107,9 +107,9 @@ struct ShelfView: View {
                         .foregroundStyle(selection.hasSelection ? Color.red : Color.secondary)
                 }
                 .disabled(!selection.hasSelection)
-                .help("Remove selected items from Shelf")
+                .help("从文件存储器移除所选项目")
 
-                Button("Done") {
+                Button("完成") {
                     selection.endSelection()
                 }
             }
@@ -127,7 +127,7 @@ struct ShelfView: View {
                     .background(.black.opacity(0.72), in: Circle())
             }
             .buttonStyle(.plain)
-            .help("Select multiple Shelf items")
+            .help("批量选择文件存储器项目")
         }
     }
 

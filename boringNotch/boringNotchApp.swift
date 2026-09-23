@@ -224,11 +224,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let uuid = screen.displayUUID else { return }
         
         if Defaults[.showOnAllDisplays], let viewModel = viewModels[uuid] {
-            viewModel.open()
-            coordinator.currentView = .shelf
+            viewModel.open(preferredView: .shelf)
         } else if !Defaults[.showOnAllDisplays], let windowScreen = window?.screen, screen == windowScreen {
-            vm.open()
-            coordinator.currentView = .shelf
+            vm.open(preferredView: .shelf)
         }
     }
 
@@ -296,6 +294,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         NotificationCenter.default.addObserver(
             forName: .agentAttentionNeeded, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let enabled = UserDefaults.standard.object(forKey: "agentIslandEnabled") as? Bool ?? true
+                let autoOpen = UserDefaults.standard.object(forKey: "agentIslandAutoOpen") as? Bool ?? true
+                guard enabled, autoOpen else { return }
+
+                self.coordinator.currentView = .agents
+                if Defaults[.showOnAllDisplays] {
+                    self.viewModels.values.forEach { $0.open() }
+                } else {
+                    self.vm.open()
+                }
+            }
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: .agentSessionStarted, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }

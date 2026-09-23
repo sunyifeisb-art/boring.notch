@@ -15,6 +15,7 @@ final class AgentSessionManager: ObservableObject {
     @Published private(set) var isInstallingHooks = false
     @Published private(set) var closingSessionIDs = Set<String>()
     @Published var selectedSessionID: String?
+    @Published var requestedOpenSessionID: String?
 
     private var pollingTask: Task<Void, Never>?
     private var attentionSessionIDs = Set<String>()
@@ -53,6 +54,9 @@ final class AgentSessionManager: ObservableObject {
         decoder.dateDecodingStrategy = .iso8601
         guard let updatedSessions = try? decoder.decode([AgentSession].self, from: data) else { return }
 
+        let previousActive = Set(sessions.filter { $0.status != .completed }.map(\.id))
+        let updatedActive = Set(updatedSessions.filter { $0.status != .completed }.map(\.id))
+        let newActive = updatedActive.subtracting(previousActive)
         let updatedAttention = Set(updatedSessions.filter { $0.status.needsAttention }.map(\.id))
         let newAttention = updatedAttention.subtracting(attentionSessionIDs)
         sessions = updatedSessions
@@ -63,8 +67,19 @@ final class AgentSessionManager: ObservableObject {
             self.selectedSessionID = nil
         }
 
+        let autoSelectNewest = UserDefaults.standard.object(forKey: "agentIslandAutoSelectNewest") as? Bool ?? true
+        if autoSelectNewest,
+           (selectedSessionID == nil || !newActive.isEmpty),
+           let newest = updatedSessions.first(where: { $0.source.lowercased() == "claude" && $0.status != .completed })
+        {
+            selectedSessionID = newest.id
+        }
+
         if !newAttention.isEmpty {
             NotificationCenter.default.post(name: .agentAttentionNeeded, object: nil)
+        }
+        if !newActive.isEmpty {
+            NotificationCenter.default.post(name: .agentSessionStarted, object: nil)
         }
     }
 
@@ -113,6 +128,11 @@ final class AgentSessionManager: ObservableObject {
     func select(_ session: AgentSession) {
         guard session.source.lowercased() == "claude" else { return }
         selectedSessionID = session.id
+    }
+
+    func requestOpen(_ session: AgentSession) {
+        select(session)
+        requestedOpenSessionID = session.id
     }
 
     func newConversation(cwd: String? = nil, prompt: String? = nil) {
@@ -174,4 +194,5 @@ final class AgentSessionManager: ObservableObject {
 
 extension Notification.Name {
     static let agentAttentionNeeded = Notification.Name("agentAttentionNeeded")
+    static let agentSessionStarted = Notification.Name("agentSessionStarted")
 }
