@@ -730,13 +730,11 @@ private struct AgentMarkdownContent: View, Equatable {
                         .font(.system(size: 12.5))
                         .foregroundStyle(isError ? Color.red : Color.primary)
                         .lineSpacing(1.5)
-                        .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 case .heading(let level):
                     Text(inlineMarkdown: block.content)
                         .font(.system(size: headingSize(level), weight: .bold))
                         .foregroundStyle(isError ? Color.red : Color.primary)
-                        .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 case .bullet:
                     listRow(marker: "•", content: block.content)
@@ -751,7 +749,6 @@ private struct AgentMarkdownContent: View, Equatable {
                             .font(.system(size: 12))
                             .foregroundStyle(isError ? Color.red : Color.secondary)
                             .italic()
-                            .textSelection(.enabled)
                     }
                 case .divider:
                     Divider().opacity(0.25)
@@ -762,6 +759,7 @@ private struct AgentMarkdownContent: View, Equatable {
                 }
             }
         }
+        .textSelection(.enabled)
     }
 
     private func heading(from line: String) -> (level: Int, text: String)? {
@@ -838,7 +836,6 @@ private struct AgentMarkdownContent: View, Equatable {
                 Text(inlineMarkdown: cell)
                     .font(.system(size: 11.5, weight: isHeader ? .semibold : .regular))
                     .foregroundStyle(isError ? Color.red : Color.primary)
-                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(width: 150, alignment: .leading)
                     .padding(.horizontal, 8)
@@ -869,7 +866,6 @@ private struct AgentMarkdownContent: View, Equatable {
             Text(inlineMarkdown: content)
                 .font(.system(size: 12.5))
                 .foregroundStyle(isError ? Color.red : Color.primary)
-                .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -898,7 +894,6 @@ private struct AgentMarkdownContent: View, Equatable {
             Text(code)
                 .font(.system(size: 11.5, design: .monospaced))
                 .foregroundStyle(isError ? Color.red : Color.primary)
-                .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 650, alignment: .leading)
         }
