@@ -233,12 +233,12 @@ struct AgentSession: Identifiable, Codable, Equatable {
 
     var questionOptions: [AgentQuestionOption] {
         guard let options = toolInput?["questions"]?.arrayValue?.first?["options"]?.arrayValue else { return [] }
-        return options.enumerated().compactMap { index, option in
+        return options.compactMap { option in
             if let label = option["label"]?.stringValue {
-                return AgentQuestionOption(label: label, value: String(index + 1))
+                return AgentQuestionOption(label: label, value: label)
             }
             if let value = option.stringValue {
-                return AgentQuestionOption(label: value, value: String(index + 1))
+                return AgentQuestionOption(label: value, value: value)
             }
             return nil
         }

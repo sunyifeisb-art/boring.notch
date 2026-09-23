@@ -6,8 +6,6 @@
 //  The XPC helper owns the socket because the main app is sandboxed.
 //
 
-import ApplicationServices
-import CoreGraphics
 import Darwin
 import Foundation
 
@@ -156,6 +154,7 @@ final class AgentBridgeService {
     private var pendingConnections: [String: Int32] = [:]
     private var runningProcesses: [String: Process] = [:]
     private var transcriptStates: [String: TranscriptState] = [:]
+    private var dismissedSessionIDs = Set<String>()
     private var socketServer: AgentUnixSocketServer?
     private let commandQueue = DispatchQueue(label: "theboringteam.boringnotch.agent-bridge.commands", attributes: .concurrent)
 
@@ -189,6 +188,7 @@ final class AgentBridgeService {
             runningProcesses.values.forEach { $0.terminate() }
             runningProcesses.removeAll()
             transcriptStates.removeAll()
+            dismissedSessionIDs.removeAll()
         }
     }
 
@@ -209,6 +209,28 @@ final class AgentBridgeService {
             encoder.dateEncodingStrategy = .iso8601
             return (try? encoder.encode(ordered)) ?? Data("[]".utf8)
         }
+    }
+
+    func closeSession(sessionID: String) -> Bool {
+        var processToStop: Process?
+        let removed = stateQueue.sync { () -> Bool in
+            guard sessions[sessionID] != nil || runningProcesses[sessionID] != nil || transcriptStates[sessionID] != nil else {
+                return false
+            }
+
+            dismissedSessionIDs.insert(sessionID)
+            sessions.removeValue(forKey: sessionID)
+            transcriptStates.removeValue(forKey: sessionID)
+            processToStop = runningProcesses.removeValue(forKey: sessionID)
+            if let descriptor = pendingConnections.removeValue(forKey: sessionID) {
+                Darwin.shutdown(descriptor, SHUT_RDWR)
+                Darwin.close(descriptor)
+            }
+            return true
+        }
+
+        processToStop?.terminate()
+        return removed
     }
 
     func respond(sessionID: String, response: Data) -> Bool {
@@ -301,7 +323,7 @@ final class AgentBridgeService {
         guard !trimmed.isEmpty else { return nil }
 
         var launchRequest: (id: String, source: String, cwd: String?, resumeID: String?, prompt: String)?
-        var terminalRequest: (id: String, prompt: String)?
+        var terminalRequest: (id: String, commands: [String], interrupt: Bool)?
         let resultID: String? = stateQueue.sync {
             let existing = sessionID.flatMap { sessions[$0] }
             let resolvedSource = existing?.source ?? source.lowercased()
@@ -316,6 +338,10 @@ final class AgentBridgeService {
             }
 
             if trimmed == "/stop", let sessionID {
+                if let existing, !existing.isManaged {
+                    terminalRequest = (existing.id, [], true)
+                    return existing.id
+                }
                 runningProcesses[sessionID]?.terminate()
                 runningProcesses.removeValue(forKey: sessionID)
                 appendSystemMessage("Stopped the current agent run.", to: sessionID, status: .idle)
@@ -388,19 +414,21 @@ final class AgentBridgeService {
                 return sessionID
             }
 
-            // A Claude session discovered by hooks is already open in its terminal.
-            // Trying to --resume it in a second Claude process is rejected as
-            // "session is running in another terminal". Route ordinary messages
-            // back into that terminal instead, so the island controls the live CC
-            // session the user is actually looking at.
-            if let existing, !existing.isManaged, !trimmed.hasPrefix("/") {
-                sessions[existing.id]?.messages.append(
-                    BridgeMessage(id: UUID(), role: "user", text: trimmed, createdAt: Date())
-                )
-                sessions[existing.id]?.lastUserText = trimmed
+            // Sessions discovered by Claude hooks are already running in Ghostty.
+            // Route messages and native slash commands to that exact terminal
+            // instead of starting a second claude --resume process.
+            if let existing, !existing.isManaged {
+                var commands = [trimmed]
+                if trimmed == "/new" || trimmed == "/clear" {
+                    commands = ["/clear"]
+                } else if trimmed.hasPrefix("/new ") {
+                    let prompt = String(trimmed.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    commands = prompt.isEmpty ? ["/clear"] : ["/clear", prompt]
+                }
+                sessions[existing.id]?.lastUserText = commands.last
                 sessions[existing.id]?.status = .inProgress
                 sessions[existing.id]?.lastActivity = Date()
-                terminalRequest = (existing.id, trimmed)
+                terminalRequest = (existing.id, commands, false)
                 return existing.id
             }
 
@@ -454,10 +482,14 @@ final class AgentBridgeService {
         if let terminalRequest {
             commandQueue.async { [weak self] in
                 guard let self else { return }
-                if !self.sendToInteractiveClaude(sessionID: terminalRequest.id, text: terminalRequest.prompt) {
+                if !self.sendToInteractiveClaude(
+                    sessionID: terminalRequest.id,
+                    commands: terminalRequest.commands,
+                    interrupt: terminalRequest.interrupt
+                ) {
                     self.stateQueue.async {
                         self.appendSystemMessage(
-                            "Could not send to the live Claude terminal. Check Accessibility permission, then try again.",
+                            "Could not reach the matching Ghostty Claude session. Allow Automation access to Ghostty or reopen the Claude session, then try again.",
                             to: terminalRequest.id,
                             status: .idle
                         )
@@ -718,52 +750,61 @@ final class AgentBridgeService {
         }
     }
 
-    private func sendToInteractiveClaude(sessionID: String, text: String) -> Bool {
-        guard AXIsProcessTrusted(),
-              jumpToTerminal(sessionID: sessionID)
-        else { return false }
+    private func sendToInteractiveClaude(sessionID: String, commands: [String], interrupt: Bool = false) -> Bool {
+        guard let session = stateQueue.sync(execute: { sessions[sessionID] }) else { return false }
+        let terminalID = session.ghosttyTerminalID ?? ""
+        let cwd = session.cwd ?? ""
+        guard !terminalID.isEmpty || !cwd.isEmpty else { return false }
 
-        // Give the terminal a moment to become the key app before injecting text.
-        Thread.sleep(forTimeInterval: 0.20)
-        guard postUnicodeText(text) else { return false }
-        Thread.sleep(forTimeInterval: 0.04)
-        return postKey(virtualKey: 36) // Return
-    }
+        let script = #"""
+        on run argv
+            set targetID to item 1 of argv
+            set targetCWD to item 2 of argv
+            set shouldInterrupt to item 3 of argv
+            set commandCount to (item 4 of argv) as integer
 
-    private func postUnicodeText(_ text: String) -> Bool {
-        guard let source = CGEventSource(stateID: .combinedSessionState) else { return false }
-        let utf16 = Array(text.utf16)
-        guard !utf16.isEmpty else { return true }
+            tell application "Ghostty"
+                set targetTerm to missing value
+                if targetID is not "" then
+                    try
+                        set targetTerm to terminal id targetID
+                    end try
+                end if
 
-        // Keep each event small; this is reliable for CJK text as well as ASCII.
-        let chunkSize = 80
-        var index = 0
-        while index < utf16.count {
-            let end = min(index + chunkSize, utf16.count)
-            let chunk = Array(utf16[index..<end])
-            guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
-                  let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
-            else { return false }
+                if targetTerm is missing value and targetCWD is not "" then
+                    set matches to every terminal whose working directory is targetCWD
+                    if (count of matches) is 1 then set targetTerm to item 1 of matches
+                end if
 
-            chunk.withUnsafeBufferPointer { buffer in
-                guard let baseAddress = buffer.baseAddress else { return }
-                down.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: baseAddress)
-            }
-            down.post(tap: .cghidEventTap)
-            up.post(tap: .cghidEventTap)
-            index = end
-            Thread.sleep(forTimeInterval: 0.01)
+                if targetTerm is missing value then error "Claude terminal is ambiguous or unavailable"
+
+                if shouldInterrupt is "1" then
+                    send key "c" to targetTerm modifiers "control"
+                else
+                    repeat with commandIndex from 1 to commandCount
+                        set payload to item (4 + commandIndex) of argv
+                        input text payload to targetTerm
+                        send key "enter" to targetTerm
+                        if commandIndex < commandCount then delay 0.20
+                    end repeat
+                end if
+
+                return id of targetTerm
+            end tell
+        end run
+        """#
+
+        var arguments = ["-e", script, "--", terminalID, cwd, interrupt ? "1" : "0", String(commands.count)]
+        arguments.append(contentsOf: commands)
+        guard let resolvedID = runText("/usr/bin/osascript", arguments: arguments), !resolvedID.isEmpty else { return false }
+
+        stateQueue.async { [weak self] in
+            guard let self, var updated = self.sessions[sessionID] else { return }
+            updated.ghosttyTerminalID = resolvedID
+            updated.status = interrupt ? .idle : .inProgress
+            updated.lastActivity = Date()
+            self.sessions[sessionID] = updated
         }
-        return true
-    }
-
-    private func postKey(virtualKey: CGKeyCode) -> Bool {
-        guard let source = CGEventSource(stateID: .combinedSessionState),
-              let down = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true),
-              let up = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: false)
-        else { return false }
-        down.post(tap: .cghidEventTap)
-        up.post(tap: .cghidEventTap)
         return true
     }
 
@@ -830,6 +871,21 @@ final class AgentBridgeService {
                 return
             }
 
+            let eventName = self.normalizedEventName(event.hookEventName)
+            if self.dismissedSessionIDs.contains(event.sessionID) {
+                if eventName == "SessionEnd" {
+                    self.dismissedSessionIDs.remove(event.sessionID)
+                    self.transcriptStates.removeValue(forKey: event.sessionID)
+                    self.runningProcesses.removeValue(forKey: event.sessionID)
+                    if let pending = self.pendingConnections.removeValue(forKey: event.sessionID) {
+                        Darwin.shutdown(pending, SHUT_RDWR)
+                        Darwin.close(pending)
+                    }
+                }
+                Darwin.close(descriptor)
+                return
+            }
+
             let now = Date()
             var session = self.sessions[event.sessionID] ?? BridgeSession(
                 id: event.sessionID,
@@ -864,7 +920,6 @@ final class AgentBridgeService {
                 self.registerTranscript(path: transcriptPath, sessionID: event.sessionID)
             }
 
-            let eventName = self.normalizedEventName(event.hookEventName)
             var holdsConnection = false
             switch eventName {
             case "SessionEnd":
@@ -899,6 +954,14 @@ final class AgentBridgeService {
                     session.status = .inProgress
                 }
                 self.sessions[event.sessionID] = session
+            case "QuestionRequest":
+                session.toolName = event.toolName
+                session.toolInput = event.toolInput
+                session.status = .waitingForAnswer
+                self.sessions[event.sessionID] = session
+                if let old = self.pendingConnections.updateValue(descriptor, forKey: event.sessionID) { Darwin.close(old) }
+                holdsConnection = true
+                self.schedulePermissionTimeout(sessionID: event.sessionID, descriptor: descriptor)
             case "PostToolUse":
                 session.toolName = nil
                 session.toolInput = nil
@@ -1048,7 +1111,13 @@ final class AgentBridgeService {
            let existingID = state.currentBridgeMessageID,
            let index = session.messages.firstIndex(where: { $0.id == existingID })
         {
-            if !session.messages[index].text.hasSuffix(text) {
+            let currentText = session.messages[index].text
+            if text == currentText || currentText.hasSuffix(text) {
+                // Already represented by the current snapshot/delta.
+            } else if text.hasPrefix(currentText) {
+                // Claude transcript rows can contain cumulative snapshots.
+                session.messages[index].text = text
+            } else {
                 session.messages[index].text += text
             }
             bridgeMessageID = existingID
@@ -1091,6 +1160,7 @@ final class AgentBridgeService {
         case "tool.start", "beforetool", "pre_tool_use", "pretooluse": return "PreToolUse"
         case "tool.end", "aftertool", "post_tool_use", "posttooluse": return "PostToolUse"
         case "permissionrequest", "permission_request": return "PermissionRequest"
+        case "questionrequest", "question_request": return "QuestionRequest"
         case "userpromptsubmit", "user_prompt_submit": return "UserPromptSubmit"
         case "stop", "turn.end", "turn_end": return "Stop"
         default: return name
@@ -1357,6 +1427,26 @@ final class AgentBridgeService {
         return nil
     }
 
+    private func runText(_ executable: String, arguments: [String]) -> String? {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0,
+                  let text = String(data: data, encoding: .utf8)
+            else { return nil }
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            return nil
+        }
+    }
+
     @discardableResult
     private func run(_ executable: String, arguments: [String]) -> Bool {
         let process = Process()
@@ -1518,6 +1608,35 @@ def get_tty():
     except Exception:
         return None
 
+def get_ghostty_terminal_id(event_name, cwd):
+    if "ghostty" not in os.environ.get("TERM_PROGRAM", "").lower():
+        return None
+    if event_name not in ("SessionStart", "UserPromptSubmit"):
+        return None
+    script = r'''
+    on run argv
+        set expectedCWD to item 1 of argv
+        tell application "Ghostty"
+            try
+                set targetTerm to focused terminal of selected tab of front window
+                if expectedCWD is "" or working directory of targetTerm is expectedCWD then
+                    return id of targetTerm
+                end if
+            end try
+        end tell
+        return ""
+    end run
+    '''
+    try:
+        value = subprocess.check_output(
+            ["/usr/bin/osascript", "-e", script, "--", cwd or ""],
+            timeout=2,
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        return value or None
+    except Exception:
+        return None
+
 def send(payload, held):
     try:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -1566,15 +1685,23 @@ def main():
     tool_name = data.get("tool_name", data.get("tool", {}).get("name", "") if isinstance(data.get("tool"), dict) else "")
     tool_input = data.get("tool_input", data.get("tool", {}).get("input", {}) if isinstance(data.get("tool"), dict) else {})
 
-    # PreToolUse is telemetry, not an approval request. Claude Code already
-    # decides whether a tool needs permission according to its permission mode.
-    # Waiting on every PreToolUse created a second, incorrect approval layer.
-    is_permission = event_name == "PermissionRequest"
+    permission_mode = data.get("permission_mode") or os.environ.get("CLAUDE_PERMISSION_MODE", "")
+    bypass_permissions = (
+        os.environ.get("CLAUDE_BYPASS_PERMISSIONS", "") == "1" or
+        permission_mode == "bypassPermissions"
+    )
+    is_question = event_name == "PreToolUse" and tool_name == "AskUserQuestion"
+    is_permission = event_name == "PermissionRequest" and not bypass_permissions
+    bridge_event_name = (
+        "QuestionRequest" if is_question else
+        "PermissionBypassed" if event_name == "PermissionRequest" and bypass_permissions else
+        event_name
+    )
 
     env = {key: value for key, value in os.environ.items() if key.startswith(("TERM", "TMUX", "SSH_", "COLORTERM", "KITTY_", "WEZTERM_"))}
     payload = {
         "session_id": session_id,
-        "hook_event_name": event_name,
+        "hook_event_name": bridge_event_name,
         "cwd": data.get("cwd", os.getcwd()),
         "tool_name": tool_name or None,
         "tool_input": tool_input,
@@ -1584,10 +1711,33 @@ def main():
         "transcript_path": data.get("transcript_path"),
         "_source": source,
         "_tty": get_tty(),
+        "_ghostty_terminal_id": get_ghostty_terminal_id(event_name, data.get("cwd", os.getcwd())),
         "_env": env
     }
-    response = send(payload, is_permission)
-    if response and is_permission:
+    response = send(payload, is_question or is_permission)
+    if response and is_question:
+        try:
+            answer = json.loads(response)
+        except Exception:
+            answer = {}
+        answers = answer.get("hookSpecificOutput", {}).get("decision", {}).get("updatedInput", {}).get("answers", {})
+        normalized_answers = {}
+        if isinstance(answers, dict):
+            for question, value in answers.items():
+                if isinstance(value, list):
+                    normalized_answers[question] = ", ".join(str(item) for item in value)
+                else:
+                    normalized_answers[question] = str(value)
+        updated_input = dict(tool_input) if isinstance(tool_input, dict) else {}
+        updated_input["answers"] = normalized_answers
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "updatedInput": updated_input
+            }
+        }))
+    elif response and is_permission:
         # The island UI returns a compact decision object. Translate it to the
         # schema Claude Code requires for a PermissionRequest hook.
         try:

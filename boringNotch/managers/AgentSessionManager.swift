@@ -92,13 +92,13 @@ final class AgentSessionManager: ObservableObject {
     }
 
     func answer(_ session: AgentSession, value: String) {
-        let question = session.questionHeader ?? "answer"
+        let question = session.questionTitle ?? session.questionHeader ?? "answer"
         sendResponse(
             sessionID: session.id,
             object: [
                 "hookSpecificOutput": [
                     "decision": [
-                        "updatedInput": ["answers": [question: [value]]]
+                        "updatedInput": ["answers": [question: value]]
                     ]
                 ]
             ]
