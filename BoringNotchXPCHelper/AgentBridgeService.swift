@@ -264,6 +264,9 @@ final class AgentBridgeService {
 
     func jumpToTerminal(sessionID: String) -> Bool {
         guard let session = stateQueue.sync(execute: { sessions[sessionID] }) else { return false }
+        if session.source.lowercased() == "claude", session.isManaged {
+            return openManagedClaudeInGhostty(sessionID: sessionID, session: session)
+        }
         let tty = session.tty ?? ""
         let termProgram = session.environment["TERM_PROGRAM"]?.lowercased() ?? ""
 
@@ -331,6 +334,64 @@ final class AgentBridgeService {
         let bundleID = session.terminalBundleID ?? bundleID(for: termProgram, source: session.source)
         guard let bundleID else { return false }
         return run("/usr/bin/open", arguments: ["-b", bundleID])
+    }
+
+    private func openManagedClaudeInGhostty(sessionID: String, session: BridgeSession) -> Bool {
+        guard let executable = executableURL(named: "claude") else { return false }
+
+        let processToStop = stateQueue.sync { runningProcesses.removeValue(forKey: sessionID) }
+        if let processToStop, processToStop.isRunning {
+            processToStop.terminate()
+            for _ in 0..<20 where processToStop.isRunning {
+                usleep(50_000)
+            }
+            if processToStop.isRunning {
+                _ = Darwin.kill(processToStop.processIdentifier, SIGKILL)
+            }
+        }
+
+        var launchCommand = "\(shellQuoted(executable.path)) --permission-mode bypassPermissions"
+        if let resumeID = session.resumeID, !resumeID.isEmpty, !resumeID.hasPrefix("managed-") {
+            launchCommand += " --resume \(shellQuoted(resumeID))"
+        }
+
+        let script = #"""
+        on run argv
+            set targetCWD to item 1 of argv
+            set launchCommand to item 2 of argv
+            set managedSessionID to item 3 of argv
+
+            tell application "Ghostty"
+                activate
+                set config to new surface configuration
+                if targetCWD is not "" then set initial working directory of config to targetCWD
+                set environment variables of config to {"BORING_NOTCH_SOURCE=claude", "BORING_NOTCH_MANAGED_SESSION_ID=" & managedSessionID, "CLAUDE_BYPASS_PERMISSIONS=1"}
+                set createdWindow to new window with configuration config
+                set targetTerm to focused terminal of selected tab of createdWindow
+                input text launchCommand to targetTerm
+                send key "enter" to targetTerm
+                focus targetTerm
+                return id of targetTerm
+            end tell
+        end run
+        """#
+
+        guard let terminalID = runText(
+            "/usr/bin/osascript",
+            arguments: ["-e", script, "--", session.cwd ?? "", launchCommand, sessionID]
+        ), !terminalID.isEmpty else { return false }
+
+        stateQueue.sync {
+            guard var updated = sessions[sessionID] else { return }
+            updated.isManaged = false
+            updated.terminalBundleID = "com.mitchellh.ghostty"
+            updated.ghosttyTerminalID = terminalID
+            updated.environment["TERM_PROGRAM"] = "ghostty"
+            updated.status = .active
+            updated.lastActivity = Date()
+            sessions[sessionID] = updated
+        }
+        return true
     }
 
     private func focusGhosttyTerminal(sessionID: String, session: BridgeSession) -> Bool {
@@ -966,6 +1027,9 @@ final class AgentBridgeService {
             session.tty = event.tty ?? session.tty
             session.terminalBundleID = event.terminalBundleID ?? session.terminalBundleID
             session.ghosttyTerminalID = event.ghosttyTerminalID ?? session.ghosttyTerminalID
+            if event.ghosttyTerminalID != nil {
+                session.isManaged = false
+            }
             session.lastActivity = now
 
             if !session.isManaged, let transcriptPath = event.transcriptPath, !transcriptPath.isEmpty {

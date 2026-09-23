@@ -228,17 +228,17 @@ struct AgentSessionsView: View {
                     .lineLimit(1)
             }
 
-            if !session.isManaged {
+            if session.source.lowercased() == "claude" {
                 Button {
                     manager.jumpToTerminal(session)
                 } label: {
-                    Image(systemName: "arrow.up.forward.app")
+                    Image(systemName: "terminal")
                         .font(.system(size: 9, weight: .semibold))
                         .frame(width: 23, height: 23)
                         .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 7))
                 }
                 .buttonStyle(.plain)
-                .help("在 Ghostty 中打开这个 Claude Code 对话")
+                .help("打开 Claude Code")
             }
 
             Button {
@@ -380,7 +380,7 @@ struct AgentSessionsView: View {
 
             TextField(composerPlaceholder(for: target), text: $draft)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12.5))
+                .font(.system(size: showsTarget ? 11 : 12.5))
                 .focused($composerFocused)
                 .onSubmit {
                     sendDraft(to: target)
@@ -1043,12 +1043,10 @@ private struct AgentSessionCard: View {
             }
 
             if session.source.lowercased() == "claude" {
-                if !session.isManaged {
-                    Button {
-                        AgentSessionManager.shared.jumpToTerminal(session)
-                    } label: {
-                        Label("在 Ghostty 中打开", systemImage: "terminal")
-                    }
+                Button {
+                    AgentSessionManager.shared.jumpToTerminal(session)
+                } label: {
+                    Label("打开 Claude Code", systemImage: "terminal")
                 }
 
                 if session.status == .active || session.status == .inProgress {

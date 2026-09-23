@@ -118,6 +118,11 @@ struct ContentView: View {
                         : cornerRadiusInsets.closed.bottom
                     )
                     .padding([.horizontal, .bottom], vm.notchState == .open ? 12 : 0)
+                    .frame(
+                        width: vm.notchState == .open ? vm.notchSize.width : nil,
+                        height: vm.notchState == .open ? vm.notchSize.height : nil,
+                        alignment: .top
+                    )
                     .background(.black)
                     .clipShape(currentNotchShape)
                     .overlay(alignment: .top) {
@@ -136,7 +141,10 @@ struct ContentView: View {
                     )
                 
                 mainLayout
-                    .frame(height: vm.notchState == .open ? vm.notchSize.height : nil)
+                    .frame(
+                        width: vm.notchState == .open ? vm.notchSize.width : nil,
+                        height: vm.notchState == .open ? vm.notchSize.height : nil
+                    )
                     .conditionalModifier(true) { view in
                         let openAnimation = Animation.spring(response: 0.42, dampingFraction: 0.8, blendDuration: 0)
                         let closeAnimation = Animation.spring(response: 0.45, dampingFraction: 1.0, blendDuration: 0)
@@ -209,11 +217,11 @@ struct ContentView: View {
                                 Label("打开任务对话", systemImage: "bubble.left.and.bubble.right")
                             }
 
-                            if !session.isManaged {
+                            if session.source.lowercased() == "claude" {
                                 Button {
                                     agentManager.jumpToTerminal(session)
                                 } label: {
-                                    Label("在 Ghostty 中打开", systemImage: "terminal")
+                                    Label("打开 Claude Code", systemImage: "terminal")
                                 }
                             }
 
@@ -297,6 +305,12 @@ struct ContentView: View {
         .background(dragDetector)
         .preferredColorScheme(.dark)
         .environmentObject(vm)
+        .onChange(of: coordinator.currentView) { _, view in
+            guard vm.notchState == .open, view != .agents else { return }
+            withAnimation(.snappy(duration: 0.22)) {
+                vm.notchSize = openNotchSize
+            }
+        }
         .onChange(of: vm.anyDropZoneTargeting) { _, isTargeted in
             anyDropDebounceTask?.cancel()
 
