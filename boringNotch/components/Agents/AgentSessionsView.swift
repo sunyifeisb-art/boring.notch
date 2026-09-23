@@ -278,11 +278,11 @@ struct AgentSessionsView: View {
 
                 Spacer(minLength: 4)
 
-                Button("拒绝") { manager.deny(session) }
+                Button("Deny") { manager.deny(session) }
                     .buttonStyle(AgentActionButtonStyle(prominent: false))
-                Button("允许") { manager.allow(session) }
+                Button("Allow") { manager.allow(session) }
                     .buttonStyle(AgentActionButtonStyle(prominent: true))
-                Button("始终允许") { manager.allow(session, always: true) }
+                Button("Always") { manager.allow(session, always: true) }
                     .buttonStyle(AgentActionButtonStyle(prominent: false))
             }
             .padding(.horizontal, 8)
@@ -568,9 +568,9 @@ private struct AgentMessageRow: View {
 
     private var roleLabel: String {
         switch message.role {
-        case "user": return "我"
+        case "user": return "You"
         case "assistant": return "Claude"
-        case "error": return "错误"
+        case "error": return "Error"
         default: return message.role.capitalized
         }
     }
@@ -688,29 +688,6 @@ private struct AgentSessionCard: View {
         .buttonStyle(.plain)
         .disabled(isClosing)
         .help(session.source.lowercased() == "claude" ? "Open live Claude conversation" : "Open task details")
-        .contextMenu {
-            Button {
-                onOpen()
-            } label: {
-                Label("打开对话", systemImage: "bubble.left.and.bubble.right")
-            }
-
-            if session.source.lowercased() == "claude" {
-                Button {
-                    AgentSessionManager.shared.jumpToTerminal(session)
-                } label: {
-                    Label("打开 Claude Code", systemImage: "terminal")
-                }
-            }
-
-            Divider()
-
-            Button(role: .destructive) {
-                AgentSessionManager.shared.close(session)
-            } label: {
-                Label("关闭任务窗口", systemImage: "xmark.circle")
-            }
-        }
     }
 
     private var borderColor: Color {
