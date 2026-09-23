@@ -6,6 +6,8 @@
 //  The XPC helper owns the socket because the main app is sandboxed.
 //
 
+import ApplicationServices
+import CoreGraphics
 import Darwin
 import Foundation
 
@@ -296,6 +298,7 @@ final class AgentBridgeService {
         guard !trimmed.isEmpty else { return nil }
 
         var launchRequest: (id: String, source: String, cwd: String?, resumeID: String?, prompt: String)?
+        var terminalRequest: (id: String, prompt: String)?
         let resultID: String? = stateQueue.sync {
             let existing = sessionID.flatMap { sessions[$0] }
             let resolvedSource = existing?.source ?? source.lowercased()
@@ -382,6 +385,22 @@ final class AgentBridgeService {
                 return sessionID
             }
 
+            // A Claude session discovered by hooks is already open in its terminal.
+            // Trying to --resume it in a second Claude process is rejected as
+            // "session is running in another terminal". Route ordinary messages
+            // back into that terminal instead, so the island controls the live CC
+            // session the user is actually looking at.
+            if let existing, !existing.isManaged, !trimmed.hasPrefix("/") {
+                sessions[existing.id]?.messages.append(
+                    BridgeMessage(id: UUID(), role: "user", text: trimmed, createdAt: Date())
+                )
+                sessions[existing.id]?.lastUserText = trimmed
+                sessions[existing.id]?.status = .inProgress
+                sessions[existing.id]?.lastActivity = Date()
+                terminalRequest = (existing.id, trimmed)
+                return existing.id
+            }
+
             let startsNew = trimmed == "/clear" || trimmed == "/new" || trimmed.hasPrefix("/new ") || existing == nil
             let targetID: String
             var prompt = trimmed
@@ -428,7 +447,20 @@ final class AgentBridgeService {
             return targetID
         }
 
-        if let launchRequest {
+        if let terminalRequest {
+            commandQueue.async { [weak self] in
+                guard let self else { return }
+                if !self.sendToInteractiveClaude(sessionID: terminalRequest.id, text: terminalRequest.prompt) {
+                    self.stateQueue.async {
+                        self.appendSystemMessage(
+                            "Could not send to the live Claude terminal. Check Accessibility permission, then try again.",
+                            to: terminalRequest.id,
+                            status: .idle
+                        )
+                    }
+                }
+            }
+        } else if let launchRequest {
             commandQueue.async { [weak self] in
                 self?.runAgent(
                     sessionID: launchRequest.id,
@@ -470,6 +502,12 @@ final class AgentBridgeService {
         ]
         process.arguments = arguments
         var environment = ProcessInfo.processInfo.environment
+        // XPC helpers inherit the GUI launch environment, not the user's shell.
+        // Claude Code provider credentials/model routing live in ~/.claude/settings.json
+        // on this machine, so merge that environment explicitly for managed chats.
+        for (key, value) in claudeSettingsEnvironment() {
+            environment[key] = value
+        }
         environment["BORING_NOTCH_MANAGED_SESSION_ID"] = sessionID
         environment["BORING_NOTCH_SOURCE"] = "claude"
         environment["CLAUDE_BYPASS_PERMISSIONS"] = "1"
@@ -894,8 +932,37 @@ final class AgentBridgeService {
     private func consumeTranscriptLine(_ line: Data, session: inout BridgeSession, state: inout TranscriptState) {
         guard !line.isEmpty,
               let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-              object["type"] as? String == "assistant",
-              let message = object["message"] as? [String: Any],
+              let type = object["type"] as? String,
+              let message = object["message"] as? [String: Any]
+        else { return }
+
+        if type == "user" {
+            let text: String
+            if let raw = message["content"] as? String {
+                text = raw
+            } else if let content = message["content"] as? [[String: Any]] {
+                text = content.compactMap { block -> String? in
+                    guard block["type"] as? String == "text" else { return nil }
+                    return block["text"] as? String
+                }.joined()
+            } else {
+                return
+            }
+
+            let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleaned.isEmpty else { return }
+            session.messages.append(BridgeMessage(id: UUID(), role: "user", text: cleaned, createdAt: Date()))
+            session.lastUserText = cleaned
+            state.currentClaudeMessageID = nil
+            state.currentBridgeMessageID = nil
+            if session.messages.count > 60 {
+                session.messages.removeFirst(session.messages.count - 60)
+            }
+            session.lastActivity = Date()
+            return
+        }
+
+        guard type == "assistant",
               let content = message["content"] as? [[String: Any]]
         else { return }
 

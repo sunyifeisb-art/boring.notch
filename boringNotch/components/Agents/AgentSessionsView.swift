@@ -181,7 +181,7 @@ struct AgentSessionsView: View {
         .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
         .popover(isPresented: $showsConversation, arrowEdge: .bottom) {
             if let selectedClaudeSession {
-                ClaudeConversationHistory(session: selectedClaudeSession)
+                ClaudeConversationHistory(sessionID: selectedClaudeSession.id)
             }
         }
     }
@@ -219,61 +219,73 @@ struct AgentSessionsView: View {
 }
 
 private struct ClaudeConversationHistory: View {
-    let session: AgentSession
+    let sessionID: String
+    @ObservedObject private var manager = AgentSessionManager.shared
+
+    private var session: AgentSession? {
+        manager.sessions.first(where: { $0.id == sessionID })
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(session.status.color)
-                    .frame(width: 6, height: 6)
-                Text(session.displayName)
-                    .font(.system(size: 11, weight: .semibold))
-                    .lineLimit(1)
-                Spacer()
-                Text(session.status.label)
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundStyle(session.status.color)
-            }
+        Group {
+            if let session {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(session.status.color)
+                            .frame(width: 6, height: 6)
+                        Text(session.displayName)
+                            .font(.system(size: 11, weight: .semibold))
+                            .lineLimit(1)
+                        Spacer()
+                        Text(session.status.label)
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(session.status.color)
+                    }
 
-            Divider()
+                    Divider()
 
-            if session.messages.isEmpty {
-                ContentUnavailableView(
-                    "No messages yet",
-                    systemImage: "bubble.left.and.bubble.right",
-                    description: Text(session.detail)
-                )
-            } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 7) {
-                            ForEach(session.messages) { message in
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(message.role.capitalized)
-                                        .font(.system(size: 8, weight: .semibold))
-                                        .foregroundStyle(messageColor(message.role))
-                                    Text(message.text.isEmpty ? "…" : message.text)
-                                        .font(.system(size: 10))
-                                        .textSelection(.enabled)
-                                        .fixedSize(horizontal: false, vertical: true)
+                    if session.messages.isEmpty {
+                        ContentUnavailableView(
+                            "No messages yet",
+                            systemImage: "bubble.left.and.bubble.right",
+                            description: Text(session.detail)
+                        )
+                    } else {
+                        ScrollViewReader { proxy in
+                            ScrollView {
+                                LazyVStack(alignment: .leading, spacing: 7) {
+                                    ForEach(session.messages) { message in
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(message.role.capitalized)
+                                                .font(.system(size: 8, weight: .semibold))
+                                                .foregroundStyle(messageColor(message.role))
+                                            Text(message.text.isEmpty ? "…" : message.text)
+                                                .font(.system(size: 10))
+                                                .textSelection(.enabled)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                        }
+                                        .padding(7)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 8))
+                                        .id(message.id)
+                                    }
                                 }
-                                .padding(7)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 8))
-                                .id(message.id)
+                            }
+                            .onAppear { scrollToLatest(session: session, using: proxy) }
+                            .onChange(of: session.messages.last?.text) {
+                                scrollToLatest(session: session, using: proxy)
                             }
                         }
                     }
-                    .onAppear { scrollToLatest(using: proxy) }
-                    .onChange(of: session.messages.last?.text) {
-                        scrollToLatest(using: proxy)
-                    }
                 }
+                .padding(12)
+                .frame(width: 380, height: 280)
+            } else {
+                ContentUnavailableView("Conversation unavailable", systemImage: "bubble.left.and.exclamationmark.bubble.right")
+                    .frame(width: 380, height: 280)
             }
         }
-        .padding(12)
-        .frame(width: 380, height: 280)
     }
 
     private func messageColor(_ role: String) -> Color {
@@ -285,7 +297,7 @@ private struct ClaudeConversationHistory: View {
         }
     }
 
-    private func scrollToLatest(using proxy: ScrollViewProxy) {
+    private func scrollToLatest(session: AgentSession, using proxy: ScrollViewProxy) {
         guard let identifier = session.messages.last?.id else { return }
         proxy.scrollTo(identifier, anchor: .bottom)
     }
@@ -295,6 +307,7 @@ private struct AgentSessionCard: View {
     let session: AgentSession
     let isSelected: Bool
     @ObservedObject private var manager = AgentSessionManager.shared
+    @State private var showsConversation = false
 
     private var cardWidth: CGFloat { session.status.needsAttention ? 236 : 180 }
 
@@ -380,10 +393,15 @@ private struct AgentSessionCard: View {
         .onTapGesture {
             if session.source.lowercased() == "claude" {
                 manager.select(session)
+                showsConversation = true
             } else if !session.status.needsAttention {
                 manager.jumpToTerminal(session)
             }
         }
+        .popover(isPresented: $showsConversation, arrowEdge: .bottom) {
+            ClaudeConversationHistory(sessionID: session.id)
+        }
+        .help(session.source.lowercased() == "claude" ? "Open Claude conversation" : "Open terminal")
     }
 
     private var borderColor: Color {
