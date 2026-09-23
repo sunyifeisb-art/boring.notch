@@ -182,12 +182,25 @@ private struct TranscriptState {
 
 private final class AgentDataCapture: @unchecked Sendable {
     private let lock = NSLock()
+    private let maximumBytes: Int
     private var data = Data()
+
+    init(maximumBytes: Int = 256 * 1024) {
+        self.maximumBytes = maximumBytes
+    }
 
     func append(_ newData: Data) {
         guard !newData.isEmpty else { return }
         lock.lock()
-        data.append(newData)
+        if newData.count >= maximumBytes {
+            data = Data(newData.suffix(maximumBytes))
+        } else {
+            let overflow = data.count + newData.count - maximumBytes
+            if overflow > 0 {
+                data.removeFirst(overflow)
+            }
+            data.append(newData)
+        }
         lock.unlock()
     }
 
@@ -662,9 +675,11 @@ final class AgentBridgeService {
                     let prompt = String(trimmed.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
                     commands = prompt.isEmpty ? ["/clear"] : ["/clear", prompt]
                 }
-                sessions[existing.id]?.lastUserText = commands.last
-                sessions[existing.id]?.status = .inProgress
-                sessions[existing.id]?.lastActivity = Date()
+                var updated = existing
+                updated.lastUserText = commands.last
+                updated.status = .inProgress
+                updated.lastActivity = Date()
+                sessions[existing.id] = updated
                 terminalRequest = (existing.id, commands, false)
                 return existing.id
             }
@@ -705,10 +720,14 @@ final class AgentBridgeService {
                 if trimmed == "/compact" {
                     prompt = "Compact the conversation context now. Preserve the current objective, decisions, constraints, completed work, and remaining tasks, then continue from the compacted context."
                 }
-                sessions[targetID]?.messages.append(BridgeMessage(id: UUID(), role: "user", text: prompt, createdAt: Date()))
-                sessions[targetID]?.lastUserText = prompt
-                sessions[targetID]?.status = .inProgress
-                sessions[targetID]?.lastActivity = Date()
+                if var updated = sessions[targetID] {
+                    updated.messages.append(BridgeMessage(id: UUID(), role: "user", text: prompt, createdAt: Date()))
+                    trimMessageHistory(&updated)
+                    updated.lastUserText = prompt
+                    updated.status = .inProgress
+                    updated.lastActivity = Date()
+                    sessions[targetID] = updated
+                }
             }
 
             guard !prompt.isEmpty else { return targetID }
@@ -809,11 +828,21 @@ final class AgentBridgeService {
             beginAgentStream(sessionID: sessionID, messageID: streamMessageID)
 
             var lineBuffer = Data()
-            var fallbackLines: [String] = []
+            var fallbackText: String?
             var finalText: String?
             var latestSnapshot: String?
             var resolvedSessionID: String?
             var streamFailed = false
+            var pendingDelta = ""
+            var lastDeltaFlush = Date.distantPast
+
+            func flushPendingDelta() {
+                guard !pendingDelta.isEmpty else { return }
+                let delta = pendingDelta
+                pendingDelta.removeAll(keepingCapacity: true)
+                lastDeltaFlush = Date()
+                appendAgentStream(delta, sessionID: sessionID, messageID: streamMessageID)
+            }
 
             func consumeLine(_ line: Data) {
                 guard !line.isEmpty else { return }
@@ -821,15 +850,22 @@ final class AgentBridgeService {
                     if let text = String(data: line, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
                        !text.isEmpty
                     {
-                        fallbackLines.append(text)
+                        fallbackText = boundedText(text, maximumCharacters: 80_000)
                     }
                     return
                 }
                 if let delta = event.delta, !delta.isEmpty {
-                    appendAgentStream(delta, sessionID: sessionID, messageID: streamMessageID)
+                    pendingDelta += delta
+                    if pendingDelta.count >= 512 || Date().timeIntervalSince(lastDeltaFlush) >= 0.08 {
+                        flushPendingDelta()
+                    }
                 }
-                if let snapshot = event.snapshot, !snapshot.isEmpty { latestSnapshot = snapshot }
-                if let result = event.result, !result.isEmpty { finalText = result }
+                if let snapshot = event.snapshot, !snapshot.isEmpty {
+                    latestSnapshot = boundedText(snapshot, maximumCharacters: 200_000)
+                }
+                if let result = event.result, !result.isEmpty {
+                    finalText = boundedText(result, maximumCharacters: 200_000)
+                }
                 if let eventSessionID = event.sessionID, !eventSessionID.isEmpty { resolvedSessionID = eventSessionID }
                 if event.failed == true { streamFailed = true }
             }
@@ -845,6 +881,7 @@ final class AgentBridgeService {
                 }
             }
             if !lineBuffer.isEmpty { consumeLine(lineBuffer) }
+            flushPendingDelta()
             process.waitUntilExit()
             errorPipe.fileHandleForReading.readabilityHandler = nil
             errorCapture.append(errorPipe.fileHandleForReading.readDataToEndOfFile())
@@ -852,7 +889,7 @@ final class AgentBridgeService {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             completeAgentRun(
                 sessionID: sessionID,
-                response: finalText ?? latestSnapshot ?? fallbackLines.last ?? errorText,
+                response: finalText ?? latestSnapshot ?? fallbackText ?? errorText,
                 resumeID: resolvedSessionID,
                 failed: process.terminationStatus != 0 || streamFailed,
                 streamMessageID: streamMessageID
@@ -873,6 +910,7 @@ final class AgentBridgeService {
         stateQueue.async { [weak self] in
             guard let self, var session = self.sessions[sessionID] else { return }
             session.messages.append(BridgeMessage(id: messageID, role: "assistant", text: "", createdAt: Date()))
+            self.trimMessageHistory(&session)
             session.status = .inProgress
             session.lastActivity = Date()
             self.sessions[sessionID] = session
@@ -884,7 +922,10 @@ final class AgentBridgeService {
             guard let self, var session = self.sessions[sessionID],
                   let index = session.messages.firstIndex(where: { $0.id == messageID })
             else { return }
-            session.messages[index].text += delta
+            session.messages[index].text = self.boundedText(
+                session.messages[index].text + delta,
+                maximumCharacters: 200_000
+            )
             session.lastAssistantMessage = session.messages[index].text
             session.status = .inProgress
             session.lastActivity = Date()
@@ -902,7 +943,12 @@ final class AgentBridgeService {
         stateQueue.async { [weak self] in
             guard let self, var session = self.sessions[sessionID] else { return }
             self.runningProcesses.removeValue(forKey: sessionID)
-            let cleaned = response?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleaned = response.map {
+                self.boundedText(
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines),
+                    maximumCharacters: 200_000
+                )
+            }
             if let streamMessageID,
                let index = session.messages.firstIndex(where: { $0.id == streamMessageID })
             {
@@ -918,6 +964,7 @@ final class AgentBridgeService {
                 session.messages.append(
                     BridgeMessage(id: UUID(), role: failed ? "error" : "assistant", text: text, createdAt: Date())
                 )
+                self.trimMessageHistory(&session)
                 session.lastAssistantMessage = text
             }
             session.resumeID = resumeID ?? session.resumeID
@@ -930,9 +977,17 @@ final class AgentBridgeService {
     private func appendSystemMessage(_ text: String, to sessionID: String, status: BridgeSessionStatus) {
         guard var session = sessions[sessionID] else { return }
         session.messages.append(BridgeMessage(id: UUID(), role: "system", text: text, createdAt: Date()))
+        trimMessageHistory(&session)
         session.status = status
         session.lastActivity = Date()
         sessions[sessionID] = session
+    }
+
+    private func trimMessageHistory(_ session: inout BridgeSession) {
+        let maximumMessageCount = 60
+        if session.messages.count > maximumMessageCount {
+            session.messages.removeFirst(session.messages.count - maximumMessageCount)
+        }
     }
 
     private func parseClaudeStreamLine(_ data: Data) -> ClaudeStreamEvent? {
