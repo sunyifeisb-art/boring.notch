@@ -8,7 +8,7 @@
 import Foundation
 import SwiftUI
 
-enum AgentJSONValue: Codable, Equatable {
+enum AgentJSONValue: Codable, Equatable, Sendable {
     case string(String)
     case number(Double)
     case bool(Bool)
@@ -84,7 +84,7 @@ enum AgentJSONValue: Codable, Equatable {
     }
 }
 
-enum AgentSessionStatus: String, Codable {
+enum AgentSessionStatus: String, Codable, Sendable {
     case active
     case idle
     case pending
@@ -149,20 +149,20 @@ struct AgentHookEvent: Decodable {
     }
 }
 
-struct AgentQuestionOption: Identifiable, Equatable {
+struct AgentQuestionOption: Identifiable, Equatable, Sendable {
     let id = UUID()
     let label: String
     let value: String
 }
 
-struct AgentMessage: Identifiable, Codable, Equatable {
+struct AgentMessage: Identifiable, Codable, Equatable, Sendable {
     let id: UUID
     let role: String
     let text: String
     let createdAt: Date
 }
 
-struct AgentSession: Identifiable, Codable, Equatable {
+struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     let id: String
     var source: String
     var status: AgentSessionStatus

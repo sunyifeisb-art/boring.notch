@@ -23,6 +23,7 @@ import Foundation
     // AI coding-agent bridge (runs outside the app sandbox)
     func startAgentBridge(with reply: @escaping (NSString?) -> Void)
     func stopAgentBridge()
+    func agentSessionsRevision(with reply: @escaping (NSNumber) -> Void)
     func agentSessionsJSON(with reply: @escaping (NSData) -> Void)
     func respondToAgent(_ sessionID: String, responseJSON: NSData, with reply: @escaping (Bool) -> Void)
     func installAgentHooks(with reply: @escaping (NSArray) -> Void)

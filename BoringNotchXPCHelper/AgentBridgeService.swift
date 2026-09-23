@@ -132,6 +132,45 @@ private struct ClaudeStreamEvent {
     var failed: Bool?
 }
 
+private struct ClaudeTranscriptLine: Decodable {
+    let type: String
+    let message: ClaudeTranscriptMessage?
+    let uuid: String?
+}
+
+private struct ClaudeTranscriptMessage: Decodable {
+    let id: String?
+    let content: ClaudeTranscriptContent
+}
+
+private enum ClaudeTranscriptContent: Decodable {
+    case text(String)
+    case blocks([ClaudeTranscriptTextBlock])
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let text = try? container.decode(String.self) {
+            self = .text(text)
+        } else {
+            self = .blocks(try container.decode([ClaudeTranscriptTextBlock].self))
+        }
+    }
+
+    var text: String {
+        switch self {
+        case .text(let text):
+            return text
+        case .blocks(let blocks):
+            return blocks.compactMap { $0.type == "text" ? $0.text : nil }.joined()
+        }
+    }
+}
+
+private struct ClaudeTranscriptTextBlock: Decodable {
+    let type: String
+    let text: String?
+}
+
 private struct TranscriptState {
     var path: String
     var offset: UInt64
@@ -160,8 +199,23 @@ private final class AgentDataCapture: @unchecked Sendable {
 }
 
 final class AgentBridgeService {
+    private static let relevantTranscriptTypeMarkers = [
+        Data("\"type\":\"user\"".utf8),
+        Data("\"type\":\"assistant\"".utf8),
+        Data("\"type\": \"user\"".utf8),
+        Data("\"type\": \"assistant\"".utf8)
+    ]
+
     private let stateQueue = DispatchQueue(label: "theboringteam.boringnotch.agent-bridge.state")
-    private var sessions: [String: BridgeSession] = [:]
+    private let transcriptDecoder = JSONDecoder()
+    private var sessionRevision: UInt64 = 1
+    private var cachedSessionsJSON: Data?
+    private var sessions: [String: BridgeSession] = [:] {
+        didSet {
+            sessionRevision &+= 1
+            cachedSessionsJSON = nil
+        }
+    }
     private var pendingConnections: [String: Int32] = [:]
     private var runningProcesses: [String: Process] = [:]
     private var transcriptStates: [String: TranscriptState] = [:]
@@ -203,14 +257,19 @@ final class AgentBridgeService {
         }
     }
 
+    func sessionsRevision() -> UInt64 {
+        stateQueue.sync {
+            prepareSessionsLocked()
+            return sessionRevision
+        }
+    }
+
     func sessionsJSON() -> Data {
         stateQueue.sync {
-            refreshTranscriptStreamsLocked()
-            let staleCutoff = Date().addingTimeInterval(-12 * 60 * 60)
-            sessions = sessions.filter { _, session in
-                session.status == .waitingForApproval || session.status == .waitingForAnswer || session.lastActivity > staleCutoff
-            }
-            let ordered = sessions.values.sorted {
+            prepareSessionsLocked()
+            if let cachedSessionsJSON { return cachedSessionsJSON }
+
+            let ordered = sessions.values.map(clientVisibleSession).sorted {
                 let lhsAttention = $0.status == .waitingForApproval || $0.status == .waitingForAnswer
                 let rhsAttention = $1.status == .waitingForApproval || $1.status == .waitingForAnswer
                 if lhsAttention != rhsAttention { return lhsAttention }
@@ -218,8 +277,59 @@ final class AgentBridgeService {
             }
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
-            return (try? encoder.encode(ordered)) ?? Data("[]".utf8)
+            let data = (try? encoder.encode(ordered)) ?? Data("[]".utf8)
+            cachedSessionsJSON = data
+            return data
         }
+    }
+
+    private func prepareSessionsLocked() {
+        refreshTranscriptStreamsLocked()
+        let staleCutoff = Date().addingTimeInterval(-12 * 60 * 60)
+        let staleSessionIDs = sessions.compactMap { identifier, session in
+            let needsAttention = session.status == .waitingForApproval || session.status == .waitingForAnswer
+            return !needsAttention && session.lastActivity <= staleCutoff ? identifier : nil
+        }
+        for identifier in staleSessionIDs {
+            sessions.removeValue(forKey: identifier)
+            transcriptStates.removeValue(forKey: identifier)
+        }
+    }
+
+    private func clientVisibleSession(_ session: BridgeSession) -> BridgeSession {
+        let maximumMessageCount = 40
+        let maximumMessageCharacters = 80_000
+        let maximumSessionCharacters = 200_000
+        var remainingCharacters = maximumSessionCharacters
+        var visibleMessages: [BridgeMessage] = []
+
+        for message in session.messages.suffix(maximumMessageCount).reversed() {
+            guard remainingCharacters > 0 else { break }
+            var visibleMessage = message
+            let allowance = min(maximumMessageCharacters, remainingCharacters)
+            visibleMessage.text = boundedText(message.text, maximumCharacters: allowance)
+            remainingCharacters -= visibleMessage.text.count
+            visibleMessages.append(visibleMessage)
+        }
+
+        var visibleSession = session
+        visibleSession.messages = visibleMessages.reversed()
+        visibleSession.lastAssistantMessage = session.lastAssistantMessage.map {
+            boundedText($0, maximumCharacters: 4_000)
+        }
+        visibleSession.lastUserText = session.lastUserText.map {
+            boundedText($0, maximumCharacters: 4_000)
+        }
+        return visibleSession
+    }
+
+    private func boundedText(_ text: String, maximumCharacters: Int) -> String {
+        guard maximumCharacters > 0, text.count > maximumCharacters else { return text }
+        let marker = "\n\n…内容过长，已省略中间部分；完整内容可在 Claude Code 中查看…\n\n"
+        let available = max(0, maximumCharacters - marker.count)
+        let prefixCount = available / 2
+        let suffixCount = available - prefixCount
+        return String(text.prefix(prefixCount)) + marker + String(text.suffix(suffixCount))
     }
 
     func closeSession(sessionID: String) -> Bool {
@@ -1149,7 +1259,8 @@ final class AgentBridgeService {
                 transcriptStates[sessionID] = state
                 continue
             }
-            let newData = handle.readDataToEndOfFile()
+            let maximumReadSize = 512 * 1024
+            let newData = (try? handle.read(upToCount: maximumReadSize)) ?? Data()
             try? handle.close()
             state.offset += UInt64(newData.count)
             guard !newData.isEmpty else {
@@ -1158,6 +1269,11 @@ final class AgentBridgeService {
             }
 
             state.remainder.append(newData)
+            let maximumRemainderSize = 4 * 1024 * 1024
+            if state.remainder.count > maximumRemainderSize {
+                state.remainder = Data(state.remainder.suffix(maximumRemainderSize))
+                state.discardLeadingPartial = true
+            }
             if state.discardLeadingPartial {
                 guard let newline = state.remainder.firstIndex(of: 0x0A) else {
                     transcriptStates[sessionID] = state
@@ -1179,26 +1295,19 @@ final class AgentBridgeService {
     }
 
     private func consumeTranscriptLine(_ line: Data, session: inout BridgeSession, state: inout TranscriptState) {
-        guard !line.isEmpty,
-              let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-              let type = object["type"] as? String,
-              let message = object["message"] as? [String: Any]
+        guard !line.isEmpty else { return }
+
+        // Claude transcript rows can contain hundreds of kilobytes of image data or tool output.
+        // Reject unrelated rows before decoding, then decode only the text fields we display so
+        // large unknown payloads never become Foundation object graphs.
+        let isRelevant = Self.relevantTranscriptTypeMarkers.contains { line.range(of: $0) != nil }
+        guard isRelevant,
+              let object = try? transcriptDecoder.decode(ClaudeTranscriptLine.self, from: line),
+              let message = object.message
         else { return }
 
-        if type == "user" {
-            let text: String
-            if let raw = message["content"] as? String {
-                text = raw
-            } else if let content = message["content"] as? [[String: Any]] {
-                text = content.compactMap { block -> String? in
-                    guard block["type"] as? String == "text" else { return nil }
-                    return block["text"] as? String
-                }.joined()
-            } else {
-                return
-            }
-
-            let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if object.type == "user" {
+            let cleaned = message.content.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !cleaned.isEmpty else { return }
             session.messages.append(BridgeMessage(id: UUID(), role: "user", text: cleaned, createdAt: Date()))
             session.lastUserText = cleaned
@@ -1211,17 +1320,12 @@ final class AgentBridgeService {
             return
         }
 
-        guard type == "assistant",
-              let content = message["content"] as? [[String: Any]]
-        else { return }
+        guard object.type == "assistant" else { return }
 
-        let text = content.compactMap { block -> String? in
-            guard block["type"] as? String == "text" else { return nil }
-            return block["text"] as? String
-        }.joined()
+        let text = message.content.text
         guard !text.isEmpty else { return }
 
-        let claudeMessageID = (message["id"] as? String) ?? (object["uuid"] as? String) ?? UUID().uuidString
+        let claudeMessageID = message.id ?? object.uuid ?? UUID().uuidString
         let bridgeMessageID: UUID
         if state.currentClaudeMessageID == claudeMessageID,
            let existingID = state.currentBridgeMessageID,

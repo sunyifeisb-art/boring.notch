@@ -19,6 +19,8 @@ final class AgentSessionManager: ObservableObject {
 
     private var pollingTask: Task<Void, Never>?
     private var attentionSessionIDs = Set<String>()
+    private var lastBridgeRevision: UInt64?
+    private var refreshInProgress = false
 
     var attentionSession: AgentSession? {
         agentSessions.first(where: { $0.status.needsAttention })
@@ -50,7 +52,10 @@ final class AgentSessionManager: ObservableObject {
             bridgeError = await XPCHelperClient.shared.startAgentBridge()
             while !Task.isCancelled {
                 await refreshSessions()
-                try? await Task.sleep(for: .milliseconds(200))
+                let interval = agentSessions.contains(where: { $0.status == .active || $0.status == .inProgress })
+                    ? 350
+                    : 1_000
+                try? await Task.sleep(for: .milliseconds(interval))
             }
         }
     }
@@ -58,15 +63,33 @@ final class AgentSessionManager: ObservableObject {
     func stop() {
         pollingTask?.cancel()
         pollingTask = nil
+        lastBridgeRevision = nil
         XPCHelperClient.shared.stopAgentBridge()
     }
 
-    func refreshSessions() async {
-        let data = await XPCHelperClient.shared.agentSessionsJSON()
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let updatedSessions = try? decoder.decode([AgentSession].self, from: data) else { return }
+    func refreshSessions(force: Bool = false) async {
+        guard !refreshInProgress else { return }
+        refreshInProgress = true
+        defer { refreshInProgress = false }
 
+        let revision = await XPCHelperClient.shared.agentSessionsRevision()
+        if !force, let revision, revision == lastBridgeRevision {
+            return
+        }
+
+        let data = await XPCHelperClient.shared.agentSessionsJSON()
+        guard let updatedSessions = await Task.detached(priority: .utility, operation: {
+            autoreleasepool {
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                return try? decoder.decode([AgentSession].self, from: data)
+            }
+        }).value else { return }
+
+        lastBridgeRevision = revision
+        guard updatedSessions != sessions else { return }
+
+        let previousChromeSignature = chromeSignature(for: sessions)
         let previousActive = Set(agentSessions.filter { $0.status != .completed }.map(\.id))
         let updatedAgentSessions = updatedSessions.filter { ["claude", "codex"].contains($0.source.lowercased()) }
         let updatedClaudeSessions = updatedAgentSessions.filter { $0.source.lowercased() == "claude" }
@@ -96,6 +119,26 @@ final class AgentSessionManager: ObservableObject {
         if !newActive.isEmpty {
             NotificationCenter.default.post(name: .agentSessionStarted, object: nil)
         }
+        if chromeSignature(for: updatedSessions) != previousChromeSignature {
+            NotificationCenter.default.post(name: .agentChromeStateChanged, object: nil)
+        }
+    }
+
+    private func chromeSignature(for sessions: [AgentSession]) -> [String] {
+        sessions
+            .filter { ["claude", "codex"].contains($0.source.lowercased()) }
+            .map { session in
+                [
+                    session.id,
+                    session.source,
+                    session.status.rawValue,
+                    session.cwd ?? "",
+                    session.title ?? "",
+                    session.toolName ?? "",
+                    session.status.needsAttention ? (session.toolInput?.displayText ?? "") : ""
+                ].joined(separator: "|")
+            }
+            .sorted()
     }
 
     func installHooks() {
@@ -210,4 +253,5 @@ final class AgentSessionManager: ObservableObject {
 extension Notification.Name {
     static let agentAttentionNeeded = Notification.Name("agentAttentionNeeded")
     static let agentSessionStarted = Notification.Name("agentSessionStarted")
+    static let agentChromeStateChanged = Notification.Name("agentChromeStateChanged")
 }

@@ -169,7 +169,7 @@ struct AgentSessionsView: View {
             detailHeader(session: session)
                 .frame(height: 30)
 
-            AgentConversationTimeline(sessionID: session.id)
+            AgentConversationTimeline(session: session)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             if session.status.needsAttention {
@@ -485,56 +485,45 @@ struct AgentSessionsView: View {
 }
 
 private struct AgentConversationTimeline: View {
-    let sessionID: String
-    @ObservedObject private var manager = AgentSessionManager.shared
-
-    private var session: AgentSession? {
-        manager.sessions.first(where: { $0.id == sessionID })
-    }
+    let session: AgentSession
 
     var body: some View {
         Group {
-            if let session {
-                if session.messages.isEmpty {
-                    ContentUnavailableView(
-                        "暂无消息",
-                        systemImage: "bubble.left.and.bubble.right",
-                        description: Text(session.detail)
-                    )
-                    .font(.system(size: 12))
-                } else {
-                    ScrollViewReader { proxy in
-                        ScrollView(.vertical, showsIndicators: false) {
-                            LazyVStack(spacing: 9) {
-                                ForEach(session.messages) { message in
-                                    AgentMessageRow(
-                                        message: message,
-                                        isStreaming: message.id == session.messages.last?.id
-                                            && message.role == "assistant"
-                                            && (session.status == .active || session.status == .inProgress)
-                                    )
-                                    .id(message.id)
-                                }
+            if session.messages.isEmpty {
+                ContentUnavailableView(
+                    "暂无消息",
+                    systemImage: "bubble.left.and.bubble.right",
+                    description: Text(session.detail)
+                )
+                .font(.system(size: 12))
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: false) {
+                        LazyVStack(spacing: 9) {
+                            ForEach(session.messages) { message in
+                                AgentMessageRow(
+                                    message: message,
+                                    isStreaming: message.id == session.messages.last?.id
+                                        && message.role == "assistant"
+                                        && (session.status == .active || session.status == .inProgress)
+                                )
+                                .equatable()
+                                .id(message.id)
                             }
-                            .padding(.horizontal, 2)
-                            .padding(.vertical, 1)
                         }
-                        .onAppear {
-                            scrollToLatest(session: session, using: proxy, animated: false)
-                        }
-                        .onChange(of: session.messages.count) { _, _ in
-                            scrollToLatest(session: session, using: proxy, animated: true)
-                        }
-                        .onChange(of: session.messages.last?.text) { _, _ in
-                            scrollToLatest(session: session, using: proxy, animated: false)
-                        }
+                        .padding(.horizontal, 2)
+                        .padding(.vertical, 1)
+                    }
+                    .onAppear {
+                        scrollToLatest(session: session, using: proxy, animated: false)
+                    }
+                    .onChange(of: session.messages.count) { _, _ in
+                        scrollToLatest(session: session, using: proxy, animated: true)
+                    }
+                    .onChange(of: session.messages.last?.text) { _, _ in
+                        scrollToLatest(session: session, using: proxy, animated: false)
                     }
                 }
-            } else {
-                ContentUnavailableView(
-                    "任务不可用",
-                    systemImage: "bubble.left.and.exclamationmark.bubble.right"
-                )
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -552,7 +541,7 @@ private struct AgentConversationTimeline: View {
     }
 }
 
-private struct AgentMessageRow: View {
+private struct AgentMessageRow: View, Equatable {
     let message: AgentMessage
     let isStreaming: Bool
 
@@ -630,7 +619,7 @@ private struct AgentMessageRow: View {
     }
 }
 
-private struct AgentMarkdownContent: View {
+private struct AgentMarkdownContent: View, Equatable {
     let text: String
     let isError: Bool
 
@@ -733,7 +722,7 @@ private struct AgentMarkdownContent: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        LazyVStack(alignment: .leading, spacing: 5) {
             ForEach(blocks) { block in
                 switch block.kind {
                 case .paragraph:
@@ -906,13 +895,12 @@ private struct AgentMarkdownContent: View {
                 .foregroundStyle(.secondary)
             }
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(code)
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .foregroundStyle(isError ? Color.red : Color.primary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: true, vertical: true)
-            }
+            Text(code)
+                .font(.system(size: 11.5, design: .monospaced))
+                .foregroundStyle(isError ? Color.red : Color.primary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 650, alignment: .leading)
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 5)
@@ -926,6 +914,10 @@ private struct AgentMarkdownContent: View {
 
 private extension Text {
     init(inlineMarkdown source: String) {
+        guard source.count <= 20_000 else {
+            self.init(source)
+            return
+        }
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace,
             failurePolicy: .returnPartiallyParsedIfPossible

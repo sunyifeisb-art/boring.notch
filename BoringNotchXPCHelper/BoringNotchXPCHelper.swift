@@ -155,6 +155,10 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
         agentBridge.stop()
     }
 
+    @objc func agentSessionsRevision(with reply: @escaping (NSNumber) -> Void) {
+        reply(NSNumber(value: agentBridge.sessionsRevision()))
+    }
+
     @objc func agentSessionsJSON(with reply: @escaping (NSData) -> Void) {
         reply(agentBridge.sessionsJSON() as NSData)
     }

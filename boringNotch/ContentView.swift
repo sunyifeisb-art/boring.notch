@@ -25,12 +25,13 @@ struct ContentView: View {
     @ObservedObject var batteryModel = BatteryStatusViewModel.shared
     @ObservedObject var brightnessManager = BrightnessManager.shared
     @ObservedObject var volumeManager = VolumeManager.shared
-    @ObservedObject var agentManager = AgentSessionManager.shared
+    private let agentManager = AgentSessionManager.shared
     @AppStorage("agentIslandEnabled") private var agentIslandEnabled = true
     @AppStorage("agentIslandShowNotifications") private var agentIslandShowNotifications = true
     @State private var hoverTask: Task<Void, Never>?
     @State private var isHovering: Bool = false
     @State private var anyDropDebounceTask: Task<Void, Never>?
+    @State private var agentChromeRevision = 0
 
     @State private var gestureProgress: CGFloat = .zero
 
@@ -99,6 +100,7 @@ struct ContentView: View {
     }
 
     var body: some View {
+        let _ = agentChromeRevision
         // Calculate scale based on gesture progress only
         let gestureScale: CGFloat = {
             guard gestureProgress != 0 else { return 1.0 }
@@ -310,6 +312,9 @@ struct ContentView: View {
             withAnimation(.snappy(duration: 0.22)) {
                 vm.notchSize = openNotchSize
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .agentChromeStateChanged)) { _ in
+            agentChromeRevision &+= 1
         }
         .onChange(of: vm.anyDropZoneTargeting) { _, isTargeted in
             anyDropDebounceTask?.cancel()

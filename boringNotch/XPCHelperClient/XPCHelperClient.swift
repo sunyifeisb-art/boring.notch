@@ -281,6 +281,20 @@ final class XPCHelperClient: NSObject {
         }
     }
 
+    nonisolated func agentSessionsRevision() async -> UInt64? {
+        do {
+            let service = await MainActor.run { ensureRemoteService() }
+            let result: NSNumber = try await service.withContinuation { service, continuation in
+                service.agentSessionsRevision { revision in
+                    continuation.resume(returning: revision)
+                }
+            }
+            return result.uint64Value
+        } catch {
+            return nil
+        }
+    }
+
     nonisolated func respondToAgent(sessionID: String, responseJSON: Data) async -> Bool {
         do {
             let service = await MainActor.run { ensureRemoteService() }
