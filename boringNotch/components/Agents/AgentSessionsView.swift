@@ -618,7 +618,12 @@ private struct AgentMarkdownContent: View {
 
     private struct Block: Identifiable {
         enum Kind {
-            case markdown
+            case paragraph
+            case heading(level: Int)
+            case bullet
+            case numbered(marker: String)
+            case quote
+            case divider
             case code(language: String?)
         }
 
@@ -639,6 +644,10 @@ private struct AgentMarkdownContent: View {
             lines.removeAll(keepingCapacity: true)
         }
 
+        func appendSingle(kind: Block.Kind, content: String) {
+            result.append(Block(id: result.count, kind: kind, content: content))
+        }
+
         for line in text.components(separatedBy: .newlines) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("```") {
@@ -647,17 +656,39 @@ private struct AgentMarkdownContent: View {
                     isCode = false
                     codeLanguage = nil
                 } else {
-                    appendBlock(kind: .markdown, lines: &lines)
+                    appendBlock(kind: .paragraph, lines: &lines)
                     isCode = true
                     let language = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
                     codeLanguage = language.isEmpty ? nil : language
                 }
+            } else if isCode {
+                lines.append(line)
+            } else if trimmed.isEmpty {
+                appendBlock(kind: .paragraph, lines: &lines)
+            } else if let heading = heading(from: trimmed) {
+                appendBlock(kind: .paragraph, lines: &lines)
+                appendSingle(kind: .heading(level: heading.level), content: heading.text)
+            } else if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+                appendBlock(kind: .paragraph, lines: &lines)
+                appendSingle(kind: .divider, content: "")
+            } else if let bullet = bulletText(from: trimmed) {
+                appendBlock(kind: .paragraph, lines: &lines)
+                appendSingle(kind: .bullet, content: bullet)
+            } else if let numbered = numberedText(from: trimmed) {
+                appendBlock(kind: .paragraph, lines: &lines)
+                appendSingle(kind: .numbered(marker: numbered.marker), content: numbered.text)
+            } else if trimmed.hasPrefix(">") {
+                appendBlock(kind: .paragraph, lines: &lines)
+                appendSingle(
+                    kind: .quote,
+                    content: String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
+                )
             } else {
                 lines.append(line)
             }
         }
 
-        appendBlock(kind: isCode ? .code(language: codeLanguage) : .markdown, lines: &lines)
+        appendBlock(kind: isCode ? .code(language: codeLanguage) : .paragraph, lines: &lines)
         return result
     }
 
@@ -665,17 +696,87 @@ private struct AgentMarkdownContent: View {
         VStack(alignment: .leading, spacing: 5) {
             ForEach(blocks) { block in
                 switch block.kind {
-                case .markdown:
-                    Text(markdown: block.content)
+                case .paragraph:
+                    Text(inlineMarkdown: block.content)
                         .font(.system(size: 9.5))
                         .foregroundStyle(isError ? Color.red : Color.primary)
                         .lineSpacing(1.5)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
+                case .heading(let level):
+                    Text(inlineMarkdown: block.content)
+                        .font(.system(size: headingSize(level), weight: .bold))
+                        .foregroundStyle(isError ? Color.red : Color.primary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .bullet:
+                    listRow(marker: "•", content: block.content)
+                case .numbered(let marker):
+                    listRow(marker: marker, content: block.content)
+                case .quote:
+                    HStack(alignment: .top, spacing: 6) {
+                        Capsule()
+                            .fill(Color.white.opacity(0.24))
+                            .frame(width: 2)
+                        Text(inlineMarkdown: block.content)
+                            .font(.system(size: 9.2))
+                            .foregroundStyle(isError ? Color.red : Color.secondary)
+                            .italic()
+                            .textSelection(.enabled)
+                    }
+                case .divider:
+                    Divider().opacity(0.25)
                 case .code(let language):
                     codeBlock(block.content, language: language)
                 }
             }
+        }
+    }
+
+    private func heading(from line: String) -> (level: Int, text: String)? {
+        let marker = line.prefix { $0 == "#" }
+        guard !marker.isEmpty, marker.count <= 6 else { return nil }
+        let remainder = line.dropFirst(marker.count)
+        guard remainder.first == " " else { return nil }
+        return (marker.count, remainder.trimmingCharacters(in: .whitespaces))
+    }
+
+    private func bulletText(from line: String) -> String? {
+        for prefix in ["- ", "* ", "+ "] where line.hasPrefix(prefix) {
+            return String(line.dropFirst(prefix.count))
+        }
+        return nil
+    }
+
+    private func numberedText(from line: String) -> (marker: String, text: String)? {
+        guard let dot = line.firstIndex(of: ".") else { return nil }
+        let number = line[..<dot]
+        guard !number.isEmpty, number.allSatisfy(\.isNumber) else { return nil }
+        let remainder = line[line.index(after: dot)...]
+        guard remainder.first == " " else { return nil }
+        return ("\(number).", remainder.trimmingCharacters(in: .whitespaces))
+    }
+
+    private func headingSize(_ level: Int) -> CGFloat {
+        switch level {
+        case 1: return 13
+        case 2: return 12
+        case 3: return 11
+        default: return 10
+        }
+    }
+
+    private func listRow(marker: String, content: String) -> some View {
+        HStack(alignment: .top, spacing: 5) {
+            Text(marker)
+                .font(.system(size: 8.5, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 10, alignment: .trailing)
+            Text(inlineMarkdown: content)
+                .font(.system(size: 9.5))
+                .foregroundStyle(isError ? Color.red : Color.primary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -719,9 +820,9 @@ private struct AgentMarkdownContent: View {
 }
 
 private extension Text {
-    init(markdown source: String) {
+    init(inlineMarkdown source: String) {
         let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .full,
+            interpretedSyntax: .inlineOnlyPreservingWhitespace,
             failurePolicy: .returnPartiallyParsedIfPossible
         )
         if let attributed = try? AttributedString(markdown: source, options: options) {
