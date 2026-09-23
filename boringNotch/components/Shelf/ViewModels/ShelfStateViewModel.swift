@@ -16,6 +16,7 @@ final class ShelfStateViewModel: ObservableObject {
     }
 
     @Published var isLoading: Bool = false
+    @Published private(set) var lastDropError: String?
 
     var isEmpty: Bool { items.isEmpty }
 
@@ -87,11 +88,19 @@ final class ShelfStateViewModel: ObservableObject {
     func load(_ providers: [NSItemProvider]) {
         guard !providers.isEmpty else { return }
         isLoading = true
+        lastDropError = nil
         Task { [weak self] in
             let dropped = await ShelfDropService.items(from: providers)
             await MainActor.run {
                 self?.add(dropped)
                 self?.isLoading = false
+                if dropped.isEmpty {
+                    self?.lastDropError = "无法读取拖入的项目"
+                    Task { @MainActor [weak self] in
+                        try? await Task.sleep(for: .seconds(3))
+                        self?.lastDropError = nil
+                    }
+                }
             }
         }
     }

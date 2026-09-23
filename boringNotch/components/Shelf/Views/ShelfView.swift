@@ -37,7 +37,8 @@ struct ShelfView: View {
     }
     
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
-        guard !selection.isDragging else { return false }
+        guard !providers.isEmpty else { return false }
+        selection.endDrag()
         vm.dropEvent = true
         ShelfStateViewModel.shared.load(providers)
         return true
@@ -77,6 +78,24 @@ struct ShelfView: View {
             .overlay(alignment: .topTrailing) {
                 selectionToolbar
                     .padding(8)
+            }
+            .overlay(alignment: .bottom) {
+                if tvm.isLoading {
+                    ProgressView("正在添加…")
+                        .font(.system(size: 9, weight: .medium))
+                        .padding(.horizontal, 9)
+                        .frame(height: 24)
+                        .background(.black.opacity(0.78), in: Capsule())
+                        .padding(8)
+                } else if let error = tvm.lastDropError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 9)
+                        .frame(height: 24)
+                        .background(.black.opacity(0.78), in: Capsule())
+                        .padding(8)
+                }
             }
             .transaction { transaction in
                 transaction.animation = vm.animation
@@ -163,9 +182,6 @@ struct ShelfView: View {
                 }
                 .padding(-spacing)
                 .scrollIndicators(.never)
-                .onDrop(of: [.fileURL, .url, .utf8PlainText, .plainText, .data], isTargeted: $vm.dragDetectorTargeting) { providers in
-                    handleDrop(providers: providers)
-                }
             }
         }
         .onAppear {

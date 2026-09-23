@@ -13,6 +13,7 @@ import Defaults
 import KeyboardShortcuts
 import SwiftUI
 import SwiftUIIntrospect
+import UniformTypeIdentifiers
 
 @MainActor
 struct ContentView: View {
@@ -449,7 +450,10 @@ struct ContentView: View {
                 .opacity(gestureProgress != 0 ? 1.0 - min(abs(gestureProgress) * 0.1, 0.3) : 1.0)
             }
         }
-        .onDrop(of: [.fileURL, .url, .utf8PlainText, .plainText, .data], delegate: GeneralDropTargetDelegate(isTargeted: $vm.generalDropTargeting))
+        .onDrop(
+            of: [.fileURL, .url, .utf8PlainText, .plainText, .data],
+            delegate: GeneralDropTargetDelegate(isTargeted: $vm.generalDropTargeting)
+        )
     }
 
     @ViewBuilder
@@ -731,10 +735,11 @@ struct GeneralDropTargetDelegate: DropDelegate {
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        return DropProposal(operation: .cancel)
+        DropProposal(operation: .copy)
     }
 
     func performDrop(info: DropInfo) -> Bool {
+        isTargeted = false
         return false
     }
 }

@@ -28,8 +28,17 @@ struct Bookmark: Sendable, Equatable, Codable {
             NSLog("✅ Successfully created bookmark for \(url.path)")
             self.data = bookmark
         } catch {
-            NSLog("❌ Failed to create bookmark for \(url.path): \(error.localizedDescription)")
-            throw error
+            // Local GitHub Actions builds are unsigned and therefore have no
+            // sandbox entitlement. Security-scoped bookmark creation fails in
+            // that environment even though the dropped file is readable.
+            // Store a regular bookmark as a compatible fallback.
+            let bookmark = try url.bookmarkData(
+                options: [],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+            NSLog("⚠️ Created non-security-scoped bookmark for \(url.path): \(error.localizedDescription)")
+            self.data = bookmark
         }
     }
 
@@ -49,8 +58,20 @@ struct Bookmark: Sendable, Equatable, Codable {
             }
             return (url, nil)
         } catch {
-            NSLog("❌ Failed to resolve bookmark: \(error.localizedDescription)")
-            return (nil, nil)
+            do {
+                var isStale = false
+                let url = try URL(
+                    resolvingBookmarkData: data,
+                    options: [],
+                    relativeTo: nil,
+                    bookmarkDataIsStale: &isStale
+                )
+                let refreshed = isStale ? try? url.bookmarkData(options: []) : nil
+                return (url, refreshed)
+            } catch {
+                NSLog("❌ Failed to resolve bookmark: \(error.localizedDescription)")
+                return (nil, nil)
+            }
         }
     }
 
