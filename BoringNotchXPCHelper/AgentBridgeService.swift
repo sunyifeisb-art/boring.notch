@@ -57,6 +57,7 @@ private struct BridgeHookEvent: Decodable {
     let tty: String?
     let terminalBundleID: String?
     let transcriptPath: String?
+    let ghosttyTerminalID: String?
 
     enum CodingKeys: String, CodingKey {
         case sessionID = "session_id"
@@ -72,6 +73,7 @@ private struct BridgeHookEvent: Decodable {
         case tty = "_tty"
         case terminalBundleID = "terminal_bundle_id"
         case transcriptPath = "transcript_path"
+        case ghosttyTerminalID = "_ghostty_terminal_id"
     }
 }
 
@@ -98,6 +100,7 @@ private struct BridgeSession: Codable {
     var environment: [String: String]
     var tty: String?
     var terminalBundleID: String?
+    var ghosttyTerminalID: String?
     var resumeID: String?
     var isManaged: Bool
     var messages: [BridgeMessage]
@@ -424,6 +427,7 @@ final class AgentBridgeService {
                     environment: [:],
                     tty: nil,
                     terminalBundleID: nil,
+                    ghosttyTerminalID: nil,
                     resumeID: nil,
                     isManaged: true,
                     messages: prompt.isEmpty ? [] : [BridgeMessage(id: UUID(), role: "user", text: prompt, createdAt: Date())],
@@ -699,6 +703,70 @@ final class AgentBridgeService {
         return parsed
     }
 
+    private func claudeSettingsEnvironment() -> [String: String] {
+        let settingsURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/settings.json")
+        guard let data = try? Data(contentsOf: settingsURL),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawEnvironment = root["env"] as? [String: Any]
+        else { return [:] }
+
+        return rawEnvironment.reduce(into: [String: String]()) { result, entry in
+            if let value = entry.value as? String {
+                result[entry.key] = value
+            }
+        }
+    }
+
+    private func sendToInteractiveClaude(sessionID: String, text: String) -> Bool {
+        guard AXIsProcessTrusted(),
+              jumpToTerminal(sessionID: sessionID)
+        else { return false }
+
+        // Give the terminal a moment to become the key app before injecting text.
+        Thread.sleep(forTimeInterval: 0.20)
+        guard postUnicodeText(text) else { return false }
+        Thread.sleep(forTimeInterval: 0.04)
+        return postKey(virtualKey: 36) // Return
+    }
+
+    private func postUnicodeText(_ text: String) -> Bool {
+        guard let source = CGEventSource(stateID: .combinedSessionState) else { return false }
+        let utf16 = Array(text.utf16)
+        guard !utf16.isEmpty else { return true }
+
+        // Keep each event small; this is reliable for CJK text as well as ASCII.
+        let chunkSize = 80
+        var index = 0
+        while index < utf16.count {
+            let end = min(index + chunkSize, utf16.count)
+            let chunk = Array(utf16[index..<end])
+            guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+                  let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+            else { return false }
+
+            chunk.withUnsafeBufferPointer { buffer in
+                guard let baseAddress = buffer.baseAddress else { return }
+                down.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: baseAddress)
+            }
+            down.post(tap: .cghidEventTap)
+            up.post(tap: .cghidEventTap)
+            index = end
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        return true
+    }
+
+    private func postKey(virtualKey: CGKeyCode) -> Bool {
+        guard let source = CGEventSource(stateID: .combinedSessionState),
+              let down = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: false)
+        else { return false }
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
+        return true
+    }
+
     private func executableURL(named name: String) -> URL? {
         if name == "claude",
            let override = ProcessInfo.processInfo.environment["BORING_NOTCH_CLAUDE_PATH"],
@@ -776,6 +844,7 @@ final class AgentBridgeService {
                 environment: event.environment ?? [:],
                 tty: event.tty,
                 terminalBundleID: event.terminalBundleID,
+                ghosttyTerminalID: event.ghosttyTerminalID,
                 resumeID: event.sessionID,
                 isManaged: false,
                 messages: [],
@@ -788,6 +857,7 @@ final class AgentBridgeService {
             session.environment.merge(event.environment ?? [:]) { _, new in new }
             session.tty = event.tty ?? session.tty
             session.terminalBundleID = event.terminalBundleID ?? session.terminalBundleID
+            session.ghosttyTerminalID = event.ghosttyTerminalID ?? session.ghosttyTerminalID
             session.lastActivity = now
 
             if !session.isManaged, let transcriptPath = event.transcriptPath, !transcriptPath.isEmpty {
