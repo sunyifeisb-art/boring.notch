@@ -23,10 +23,13 @@ let shelfTab = TabModel(label: "Shelf", icon: "tray.fill", view: .shelf)
 struct TabSelectionView: View {
     @ObservedObject var coordinator = BoringViewCoordinator.shared
     @Default(.boringShelf) private var boringShelf
+    @AppStorage("agentIslandEnabled") private var agentIslandEnabled = true
     @Namespace var animation
 
     private var tabs: [TabModel] {
-        boringShelf ? [homeTab, shelfTab, agentsTab] : [homeTab, agentsTab]
+        var items = boringShelf ? [homeTab, shelfTab] : [homeTab]
+        if agentIslandEnabled { items.append(agentsTab) }
+        return items
     }
 
     var body: some View {

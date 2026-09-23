@@ -278,11 +278,11 @@ struct AgentSessionsView: View {
 
                 Spacer(minLength: 4)
 
-                Button("Deny") { manager.deny(session) }
+                Button("拒绝") { manager.deny(session) }
                     .buttonStyle(AgentActionButtonStyle(prominent: false))
-                Button("Allow") { manager.allow(session) }
+                Button("允许") { manager.allow(session) }
                     .buttonStyle(AgentActionButtonStyle(prominent: true))
-                Button("Always") { manager.allow(session, always: true) }
+                Button("始终允许") { manager.allow(session, always: true) }
                     .buttonStyle(AgentActionButtonStyle(prominent: false))
             }
             .padding(.horizontal, 8)
@@ -294,28 +294,28 @@ struct AgentSessionsView: View {
     private func claudeComposer(for target: AgentSession?, showsTarget: Bool) -> some View {
         HStack(spacing: 6) {
             Menu {
-                Button("New conversation") {
+                Button("新建对话") {
                     manager.newConversation()
                     detailSessionID = nil
                 }
-                Button("New in folder…") { showsDirectoryPicker = true }
+                Button("在文件夹中新建…") { showsDirectoryPicker = true }
 
                 if target != nil {
                     Divider()
-                    Button("Open conversation") {
+                    Button("打开对话") {
                         if let target { openSession(target) }
                     }
-                    Button("Clear and start over") { submitCommand("/clear", to: target) }
-                    Button("Stop current run") { submitCommand("/stop", to: target) }
-                    Button("Compact context") { submitCommand("/compact", to: target) }
+                    Button("清空并重新开始") { submitCommand("/clear", to: target) }
+                    Button("停止当前运行") { submitCommand("/stop", to: target) }
+                    Button("压缩上下文") { submitCommand("/compact", to: target) }
                     Divider()
-                    Button("Current session") { submitCommand("/current", to: target) }
-                    Button("List conversations") { submitCommand("/list", to: target) }
-                    Button("Command help") { submitCommand("/help", to: target) }
+                    Button("当前会话") { submitCommand("/current", to: target) }
+                    Button("查看对话列表") { submitCommand("/list", to: target) }
+                    Button("命令帮助") { submitCommand("/help", to: target) }
                 }
 
                 Divider()
-                Button("Install or repair hooks") { manager.installHooks() }
+                Button("安装或修复 Hooks") { manager.installHooks() }
             } label: {
                 Image(systemName: "chevron.left.forwardslash.chevron.right")
                     .font(.system(size: 10, weight: .semibold))
@@ -568,9 +568,9 @@ private struct AgentMessageRow: View {
 
     private var roleLabel: String {
         switch message.role {
-        case "user": return "You"
+        case "user": return "我"
         case "assistant": return "Claude"
-        case "error": return "Error"
+        case "error": return "错误"
         default: return message.role.capitalized
         }
     }
@@ -688,6 +688,29 @@ private struct AgentSessionCard: View {
         .buttonStyle(.plain)
         .disabled(isClosing)
         .help(session.source.lowercased() == "claude" ? "Open live Claude conversation" : "Open task details")
+        .contextMenu {
+            Button {
+                onOpen()
+            } label: {
+                Label("打开对话", systemImage: "bubble.left.and.bubble.right")
+            }
+
+            if session.source.lowercased() == "claude" {
+                Button {
+                    AgentSessionManager.shared.jumpToTerminal(session)
+                } label: {
+                    Label("打开 Claude Code", systemImage: "terminal")
+                }
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                AgentSessionManager.shared.close(session)
+            } label: {
+                Label("关闭任务窗口", systemImage: "xmark.circle")
+            }
+        }
     }
 
     private var borderColor: Color {

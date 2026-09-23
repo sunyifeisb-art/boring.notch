@@ -282,7 +282,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
 
-        AgentSessionManager.shared.start()
+        let agentIslandEnabled = UserDefaults.standard.object(forKey: "agentIslandEnabled") as? Bool ?? true
+        if agentIslandEnabled {
+            AgentSessionManager.shared.start()
+        }
 
         NotificationCenter.default.addObserver(
             self,
@@ -296,6 +299,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                let enabled = UserDefaults.standard.object(forKey: "agentIslandEnabled") as? Bool ?? true
+                let autoOpen = UserDefaults.standard.object(forKey: "agentIslandAutoOpen") as? Bool ?? true
+                guard enabled, autoOpen else { return }
+
                 self.coordinator.currentView = .agents
                 if Defaults[.showOnAllDisplays] {
                     self.viewModels.values.forEach { $0.open() }

@@ -51,6 +51,9 @@ struct SettingsView: View {
                 NavigationLink(value: "Shelf") {
                     Label("Shelf", systemImage: "books.vertical")
                 }
+                NavigationLink(value: "Agent") {
+                    Label("Agent 灵动岛", systemImage: "terminal.fill")
+                }
                 NavigationLink(value: "Shortcuts") {
                     Label("Shortcuts", systemImage: "keyboard")
                 }
@@ -85,6 +88,8 @@ struct SettingsView: View {
                     Charge()
                 case "Shelf":
                     Shelf()
+                case "Agent":
+                    AgentSettings()
                 case "Shortcuts":
                     Shortcuts()
                 case "Extensions":
@@ -124,6 +129,41 @@ struct SettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("AccentColorChanged"))) { _ in
             accentColorUpdateTrigger = UUID()
         }
+    }
+}
+
+struct AgentSettings: View {
+    @AppStorage("agentIslandEnabled") private var enabled = true
+    @AppStorage("agentIslandAutoOpen") private var autoOpen = true
+    @AppStorage("agentIslandShowNotifications") private var showNotifications = true
+
+    var body: some View {
+        Form {
+            Section("Agent 灵动岛") {
+                Toggle("启用 Agent 灵动岛", isOn: $enabled)
+                    .onChange(of: enabled) { _, isEnabled in
+                        if isEnabled {
+                            AgentSessionManager.shared.start()
+                        } else {
+                            AgentSessionManager.shared.stop()
+                            if BoringViewCoordinator.shared.currentView == .agents {
+                                BoringViewCoordinator.shared.currentView = .home
+                            }
+                        }
+                    }
+                Toggle("有任务时自动切换到 Agent", isOn: $autoOpen)
+                    .disabled(!enabled)
+                Toggle("显示任务状态提醒", isOn: $showNotifications)
+                    .disabled(!enabled)
+            }
+
+            Section("任务交互") {
+                Text("右键任务可打开对话、打开 Claude Code、关闭任务窗口。")
+                Text("关闭外部 Claude 任务只会从灵动岛移除，不会关闭终端中的 Claude 会话。")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 
