@@ -321,6 +321,19 @@ final class XPCHelperClient: NSObject {
         }
     }
 
+    nonisolated func closeAgentSession(sessionID: String) async -> Bool {
+        do {
+            let service = await MainActor.run { ensureRemoteService() }
+            return try await service.withContinuation { service, continuation in
+                service.closeAgentSession(sessionID) { success in
+                    continuation.resume(returning: success)
+                }
+            }
+        } catch {
+            return false
+        }
+    }
+
     nonisolated func sendAgentMessage(sessionID: String?, source: String, cwd: String?, message: String) async -> String? {
         do {
             let service = await MainActor.run { ensureRemoteService() }
