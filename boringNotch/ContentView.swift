@@ -651,6 +651,15 @@ struct ContentView: View {
                 guard !Task.isCancelled else { return }
                 
                 await MainActor.run {
+                    // SwiftUI can briefly emit a false hover transition when
+                    // the focused composer re-renders after pressing Return.
+                    // Verify the real pointer position before collapsing so a
+                    // submitted message never closes the notch by itself.
+                    guard !self.vm.isMouseHovering() else {
+                        self.isHovering = true
+                        return
+                    }
+
                     withAnimation(animationSpring) {
                         self.isHovering = false
                     }
