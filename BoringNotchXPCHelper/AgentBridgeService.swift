@@ -492,12 +492,16 @@ final class AgentBridgeService {
             }
         }
 
-        var launchCommand = "\(shellQuoted(executable.path)) --permission-mode bypassPermissions"
+        var claudeCommand = "\(shellQuoted(executable.path)) --permission-mode bypassPermissions"
         if let resumeID = session.resumeID,
            UUID(uuidString: resumeID) != nil
         {
-            launchCommand += " --resume \(shellQuoted(resumeID))"
+            claudeCommand += " --resume \(shellQuoted(resumeID))"
         }
+        // Ghostty's surface configuration can launch a command directly. Use
+        // an explicit login shell so quoted executable paths and arguments are
+        // interpreted consistently without relying on synthetic key presses.
+        let launchCommand = "/bin/zsh -lc \(shellQuoted(claudeCommand))"
 
         let script = #"""
         on run argv
@@ -510,7 +514,8 @@ final class AgentBridgeService {
                 set config to new surface configuration
                 if targetCWD is not "" then set initial working directory of config to targetCWD
                 set environment variables of config to {"BORING_NOTCH_SOURCE=claude", "BORING_NOTCH_MANAGED_SESSION_ID=" & managedSessionID, "CLAUDE_BYPASS_PERMISSIONS=1"}
-                set initial input of config to launchCommand & linefeed
+                set command of config to launchCommand
+                set wait after command of config to true
                 set createdWindow to new window with configuration config
                 set targetTerm to focused terminal of selected tab of createdWindow
                 focus targetTerm
