@@ -16,6 +16,7 @@ final class AgentSessionManager: ObservableObject {
     @Published private(set) var closingSessionIDs = Set<String>()
     @Published var selectedSessionID: String?
     @Published var requestedOpenSessionID: String?
+    @Published var terminalOpenError: String?
 
     private var pollingTask: Task<Void, Never>?
     private var attentionSessionIDs = Set<String>()
@@ -180,7 +181,17 @@ final class AgentSessionManager: ObservableObject {
     }
 
     func jumpToTerminal(_ session: AgentSession) {
-        Task { _ = await XPCHelperClient.shared.jumpToAgentTerminal(sessionID: session.id) }
+        terminalOpenError = nil
+        Task {
+            let opened = await XPCHelperClient.shared.jumpToAgentTerminal(sessionID: session.id)
+            if !opened {
+                terminalOpenError = "无法恢复这个 Claude Code 会话。请确认已安装 Ghostty 与 Claude Code，并允许 Boring Notch 自动化控制 Ghostty。"
+            }
+        }
+    }
+
+    func dismissTerminalOpenError() {
+        terminalOpenError = nil
     }
 
     func select(_ session: AgentSession) {

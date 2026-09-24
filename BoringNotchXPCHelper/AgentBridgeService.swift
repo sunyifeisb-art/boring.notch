@@ -387,8 +387,9 @@ final class AgentBridgeService {
 
     func jumpToTerminal(sessionID: String) -> Bool {
         guard let session = stateQueue.sync(execute: { sessions[sessionID] }) else { return false }
-        if session.source.lowercased() == "claude", session.isManaged {
-            return openManagedClaudeInGhostty(sessionID: sessionID, session: session)
+        let isClaude = session.source.lowercased() == "claude"
+        if isClaude, session.isManaged {
+            return openClaudeInGhostty(sessionID: sessionID, session: session)
         }
         let tty = session.tty ?? ""
         let termProgram = session.environment["TERM_PROGRAM"]?.lowercased() ?? ""
@@ -398,7 +399,16 @@ final class AgentBridgeService {
         }
 
         if termProgram.contains("ghostty") || session.terminalBundleID == "com.mitchellh.ghostty" {
-            return focusGhosttyTerminal(sessionID: sessionID, session: session)
+            if focusGhosttyTerminal(sessionID: sessionID, session: session) {
+                return true
+            }
+            // The original Ghostty surface may have been closed or recreated.
+            // Restore the Claude conversation in a fresh surface instead of
+            // making the menu item appear to do nothing.
+            if isClaude {
+                return openClaudeInGhostty(sessionID: sessionID, session: session)
+            }
+            return false
         }
 
         if let paneID = session.environment["WEZTERM_PANE"],
@@ -455,11 +465,20 @@ final class AgentBridgeService {
         }
 
         let bundleID = session.terminalBundleID ?? bundleID(for: termProgram, source: session.source)
-        guard let bundleID else { return false }
-        return run("/usr/bin/open", arguments: ["-b", bundleID])
+        if let bundleID, run("/usr/bin/open", arguments: ["-b", bundleID]) {
+            return true
+        }
+
+        // Hook-discovered Claude sessions can outlive their original terminal,
+        // and older hook events may not include terminal metadata. A Claude
+        // session ID is enough to reopen the exact conversation in Ghostty.
+        if isClaude {
+            return openClaudeInGhostty(sessionID: sessionID, session: session)
+        }
+        return false
     }
 
-    private func openManagedClaudeInGhostty(sessionID: String, session: BridgeSession) -> Bool {
+    private func openClaudeInGhostty(sessionID: String, session: BridgeSession) -> Bool {
         guard let executable = executableURL(named: "claude") else { return false }
 
         let processToStop = stateQueue.sync { runningProcesses.removeValue(forKey: sessionID) }
@@ -474,7 +493,9 @@ final class AgentBridgeService {
         }
 
         var launchCommand = "\(shellQuoted(executable.path)) --permission-mode bypassPermissions"
-        if let resumeID = session.resumeID, !resumeID.isEmpty, !resumeID.hasPrefix("managed-") {
+        if let resumeID = session.resumeID,
+           UUID(uuidString: resumeID) != nil
+        {
             launchCommand += " --resume \(shellQuoted(resumeID))"
         }
 
@@ -489,10 +510,9 @@ final class AgentBridgeService {
                 set config to new surface configuration
                 if targetCWD is not "" then set initial working directory of config to targetCWD
                 set environment variables of config to {"BORING_NOTCH_SOURCE=claude", "BORING_NOTCH_MANAGED_SESSION_ID=" & managedSessionID, "CLAUDE_BYPASS_PERMISSIONS=1"}
+                set initial input of config to launchCommand & linefeed
                 set createdWindow to new window with configuration config
                 set targetTerm to focused terminal of selected tab of createdWindow
-                input text launchCommand to targetTerm
-                send key "enter" to targetTerm
                 focus targetTerm
                 return id of targetTerm
             end tell
@@ -866,7 +886,10 @@ final class AgentBridgeService {
                 if let result = event.result, !result.isEmpty {
                     finalText = boundedText(result, maximumCharacters: 200_000)
                 }
-                if let eventSessionID = event.sessionID, !eventSessionID.isEmpty { resolvedSessionID = eventSessionID }
+                if let eventSessionID = event.sessionID, !eventSessionID.isEmpty {
+                    resolvedSessionID = eventSessionID
+                    self.rememberResumeID(eventSessionID, for: sessionID)
+                }
                 if event.failed == true { streamFailed = true }
             }
 
@@ -913,6 +936,17 @@ final class AgentBridgeService {
             self.trimMessageHistory(&session)
             session.status = .inProgress
             session.lastActivity = Date()
+            self.sessions[sessionID] = session
+        }
+    }
+
+    private func rememberResumeID(_ resumeID: String, for sessionID: String) {
+        stateQueue.async { [weak self] in
+            guard let self,
+                  var session = self.sessions[sessionID],
+                  session.resumeID != resumeID
+            else { return }
+            session.resumeID = resumeID
             self.sessions[sessionID] = session
         }
     }

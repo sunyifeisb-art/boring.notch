@@ -73,6 +73,19 @@ struct AgentSessionsView: View {
                 vm.notchSize = openNotchSize
             }
         }
+        .alert(
+            "无法打开 Claude Code",
+            isPresented: Binding(
+                get: { manager.terminalOpenError != nil },
+                set: { isPresented in
+                    if !isPresented { manager.dismissTerminalOpenError() }
+                }
+            )
+        ) {
+            Button("好") { manager.dismissTerminalOpenError() }
+        } message: {
+            Text(manager.terminalOpenError ?? "")
+        }
     }
 
     private var taskList: some View {
