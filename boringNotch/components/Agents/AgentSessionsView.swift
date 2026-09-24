@@ -416,7 +416,7 @@ struct AgentSessionsView: View {
 
     private func agentComposer(for target: AgentSession?, showsTarget: Bool) -> some View {
         let providerName = target.map { providerDisplayName($0.source) } ?? "Claude Code"
-        HStack(spacing: 6) {
+        return HStack(spacing: 6) {
             Menu {
                 Button("新建 Claude 对话") {
                     manager.newConversation()
@@ -578,6 +578,11 @@ struct AgentSessionsView: View {
         detailSessionID = session.id
         manager.select(session)
         focusComposer()
+    }
+
+    private func openCodexDesktop(_ session: AgentSession) {
+        guard let url = URL(string: "codex://threads/\(session.id)") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private func providerDisplayName(_ source: String) -> String {
@@ -1101,6 +1106,7 @@ private struct AgentMarkdownContent: View, Equatable {
     var body: some View {
         LazyVStack(alignment: .leading, spacing: 5) {
             ForEach(blocks) { block in
+                Group {
                 switch block.kind {
                 case .paragraph:
                     AgentInlineMarkdown(source: block.content, fontSize: 12.5, color: isError ? .red : .primary)
@@ -1142,6 +1148,7 @@ private struct AgentMarkdownContent: View, Equatable {
                     codeBlock(block.content, language: language)
                 case .table(let headers, let rows):
                     markdownTable(headers: headers, rows: rows)
+                }
                 }
                 .id("\(messageID.uuidString)-block-\(block.id)")
             }
