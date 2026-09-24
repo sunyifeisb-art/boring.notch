@@ -295,6 +295,30 @@ final class XPCHelperClient: NSObject {
         }
     }
 
+    nonisolated func codexUsageJSON() async -> Data {
+        do {
+            let service = await MainActor.run { ensureRemoteService() }
+            let result: NSData = try await service.withContinuation { service, continuation in
+                service.codexUsageJSON { data in continuation.resume(returning: data) }
+            }
+            return result as Data
+        } catch {
+            return Data("{\"fiveHourRemainingPercent\":null,\"weeklyRemainingPercent\":null,\"updatedAt\":null,\"error\":\"额度服务连接失败\"}".utf8)
+        }
+    }
+
+    nonisolated func widgetCatalogJSON() async -> Data {
+        do {
+            let service = await MainActor.run { ensureRemoteService() }
+            let result: NSData = try await service.withContinuation { service, continuation in
+                service.widgetCatalogJSON { data in continuation.resume(returning: data) }
+            }
+            return result as Data
+        } catch {
+            return Data("[]".utf8)
+        }
+    }
+
     nonisolated func respondToAgent(sessionID: String, responseJSON: Data) async -> Bool {
         do {
             let service = await MainActor.run { ensureRemoteService() }

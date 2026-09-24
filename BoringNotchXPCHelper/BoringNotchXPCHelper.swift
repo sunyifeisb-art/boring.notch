@@ -163,6 +163,16 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
         reply(agentBridge.sessionsJSON() as NSData)
     }
 
+    @objc func codexUsageJSON(with reply: @escaping (NSData) -> Void) {
+        agentBridge.codexUsageJSON { data in reply(data as NSData) }
+    }
+
+    @objc func widgetCatalogJSON(with reply: @escaping (NSData) -> Void) {
+        DispatchQueue.global(qos: .utility).async {
+            reply(WidgetCatalogScanner.scan() as NSData)
+        }
+    }
+
     @objc func respondToAgent(_ sessionID: String, responseJSON: NSData, with reply: @escaping (Bool) -> Void) {
         reply(agentBridge.respond(sessionID: sessionID, response: responseJSON as Data))
     }

@@ -323,6 +323,27 @@ final class ShelfItemViewModel: ObservableObject {
 
         menu.addItem(NSMenuItem.separator())
         addMenuItem(title: "Share…")
+
+        if selectedItems.contains(where: { item in
+            if case .file = item.kind { return true }
+            if case .link = item.kind { return true }
+            if case .text = item.kind { return true }
+            return false
+        }) {
+            let agentItem = NSMenuItem(title: "交给 Agent 阅读", action: nil, keyEquivalent: "")
+            let agentMenu = NSMenu()
+            agentMenu.addItem(NSMenuItem(title: "发送到 Claude Code", action: nil, keyEquivalent: ""))
+            let codexAvailable = AgentSessionManager.shared.agentSessions.contains {
+                $0.source.lowercased() == "codex"
+                    && [.active, .inProgress, .pending, .idle].contains($0.status)
+            }
+            let codexItem = NSMenuItem(title: "发送到 Codex 桌面", action: nil, keyEquivalent: "")
+            codexItem.isEnabled = codexAvailable
+            if !codexAvailable { codexItem.toolTip = "先启动一个 Codex 桌面任务，再从这里发送文件上下文。" }
+            agentMenu.addItem(codexItem)
+            agentItem.submenu = agentMenu
+            menu.addItem(agentItem)
+        }
         
         // Add image processing options for image files grouped under "Image Actions"
         let imageURLs = selectedFileURLs.filter { ImageProcessingService.shared.isImageFile($0) }
@@ -481,6 +502,18 @@ final class ShelfItemViewModel: ObservableObject {
 
             case "Share…":
                 viewModel.shareItem(from: view)
+
+            case "发送到 Claude Code":
+                AgentSessionManager.shared.sendShelfItemsToAgent(
+                    ShelfSelectionModel.shared.selectedItems(in: ShelfStateViewModel.shared.items),
+                    source: "claude"
+                )
+
+            case "发送到 Codex 桌面":
+                AgentSessionManager.shared.sendShelfItemsToAgent(
+                    ShelfSelectionModel.shared.selectedItems(in: ShelfStateViewModel.shared.items),
+                    source: "codex"
+                )
 
             case "Rename":
                 let selected = ShelfSelectionModel.shared.selectedItems(in: ShelfStateViewModel.shared.items)

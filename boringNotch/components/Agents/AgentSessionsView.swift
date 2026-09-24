@@ -5,6 +5,7 @@
 
 import AppKit
 import SwiftUI
+import SwiftUIMath
 import UniformTypeIdentifiers
 
 struct AgentSessionsView: View {
@@ -13,6 +14,7 @@ struct AgentSessionsView: View {
     @State private var draft = ""
     @State private var detailSessionID: String?
     @State private var showsDirectoryPicker = false
+    @State private var isDroppingFileContext = false
     @AppStorage("agentIslandShowCompleted") private var showCompleted = true
     @FocusState private var composerFocused: Bool
 
@@ -20,15 +22,23 @@ struct AgentSessionsView: View {
         showCompleted ? manager.agentSessions : manager.agentSessions.filter { $0.status != .completed }
     }
 
-    private var selectedClaudeSession: AgentSession? {
-        displayedSessions.first {
-            $0.id == manager.selectedSessionID && $0.source.lowercased() == "claude"
-        }
+    private var selectedAgentSession: AgentSession? {
+        displayedSessions.first { $0.id == manager.selectedSessionID }
     }
 
     private var detailSession: AgentSession? {
         guard let detailSessionID else { return nil }
         return manager.sessions.first(where: { $0.id == detailSessionID })
+    }
+
+    private var activeCodexSessionIDs: [String] {
+        manager.agentSessions
+            .filter {
+                $0.source.lowercased() == "codex"
+                    && [.active, .inProgress, .pending].contains($0.status)
+            }
+            .map(\.id)
+            .sorted()
     }
 
     var body: some View {
@@ -63,8 +73,12 @@ struct AgentSessionsView: View {
         .onChange(of: manager.requestedOpenSessionID) { _, identifier in
             consumeOpenRequest(identifier)
         }
+        .onChange(of: activeCodexSessionIDs) { _, identifiers in
+            manager.refreshCodexUsageIfNeeded(activeSessionIDs: identifiers)
+        }
         .onAppear {
             consumeOpenRequest(manager.requestedOpenSessionID)
+            manager.refreshCodexUsageIfNeeded(activeSessionIDs: activeCodexSessionIDs)
             updateNotchSize(hasDetail: detailSessionID != nil)
         }
         .onDisappear {
@@ -93,7 +107,7 @@ struct AgentSessionsView: View {
             sessionStrip
                 .frame(height: 74)
 
-            claudeComposer(for: selectedClaudeSession, showsTarget: true)
+            agentComposer(for: selectedAgentSession, showsTarget: true)
                 .frame(height: 32)
         }
     }
@@ -109,7 +123,8 @@ struct AgentSessionsView: View {
                         AgentSessionCard(
                             session: session,
                             isSelected: manager.selectedSessionID == session.id,
-                            isClosing: manager.closingSessionIDs.contains(session.id)
+                            isClosing: manager.closingSessionIDs.contains(session.id),
+                            onDropContext: { providers in handleFileContextDrop(providers, for: session) }
                         ) {
                             openSession(session)
                         }
@@ -173,8 +188,8 @@ struct AgentSessionsView: View {
         if let bridgeError = manager.bridgeError { return bridgeError }
         if let result = manager.hookInstallSummary { return result }
         return !showCompleted && !manager.agentSessions.isEmpty
-            ? "当前没有进行中的任务，可在下方新建 Claude 对话。"
-            : "Claude Code 与 Codex 连接已就绪，启动任务后会自动显示在这里。"
+            ? "当前没有进行中的任务，可在下方新建 Claude Code 对话。"
+            : "安装并信任 Agent Hooks 后，Claude Code 与 Codex 桌面任务会同步到这里。"
     }
 
     private func taskDetail(session: AgentSession) -> some View {
@@ -183,16 +198,32 @@ struct AgentSessionsView: View {
                 .frame(height: 30)
 
             AgentConversationTimeline(session: session)
+                .id(session.id)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay {
+                    if isDroppingFileContext {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.accentColor.opacity(0.9), style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                            .overlay {
+                                Text("松开后将文件作为对话上下文发送")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 7)
+                                    .background(.black.opacity(0.82), in: Capsule())
+                            }
+                            .allowsHitTesting(false)
+                    }
+                }
+                .onDrop(of: [.fileURL, .url, .utf8PlainText, .plainText], isTargeted: $isDroppingFileContext) { providers in
+                    handleFileContextDrop(providers, for: session)
+                }
 
             if session.status.needsAttention {
                 attentionBar(session: session)
             }
 
-            if session.source.lowercased() == "claude" {
-                claudeComposer(for: session, showsTarget: false)
-                    .frame(height: 36)
-            }
+            agentComposer(for: session, showsTarget: false)
+                .frame(height: 36)
         }
     }
 
@@ -223,6 +254,49 @@ struct AgentSessionsView: View {
                 .foregroundStyle(.white)
                 .lineLimit(1)
 
+            if session.source.lowercased() == "codex",
+               [.active, .inProgress, .pending].contains(session.status),
+               let usage = manager.codexUsage {
+                Button {
+                    manager.refreshCodexUsage()
+                } label: {
+                    HStack(spacing: 3) {
+                        if manager.isRefreshingCodexUsage {
+                            ProgressView().controlSize(.mini).scaleEffect(0.65)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 7, weight: .semibold))
+                        }
+                        Text(usage.displayLabel)
+                            .lineLimit(1)
+                    }
+                    .font(.system(size: 8, weight: .medium, design: .rounded))
+                    .foregroundStyle(usage.error == nil ? Color.secondary : Color.orange)
+                }
+                .buttonStyle(.plain)
+                .disabled(manager.isRefreshingCodexUsage)
+                .help(usage.error ?? "点击刷新 Codex 账户额度")
+            } else if session.source.lowercased() == "codex",
+                      [.active, .inProgress, .pending].contains(session.status) {
+                Button {
+                    manager.refreshCodexUsage()
+                } label: {
+                    HStack(spacing: 3) {
+                        if manager.isRefreshingCodexUsage {
+                            ProgressView().controlSize(.mini).scaleEffect(0.65)
+                        } else {
+                            Image(systemName: "gauge.with.dots.needle.67percent")
+                                .font(.system(size: 8, weight: .medium))
+                        }
+                        Text(manager.isRefreshingCodexUsage ? "读取中" : "读取额度")
+                            .font(.system(size: 8, weight: .medium))
+                    }
+                    .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .disabled(manager.isRefreshingCodexUsage)
+            }
+
             Spacer(minLength: 4)
 
             HStack(spacing: 4) {
@@ -252,6 +326,17 @@ struct AgentSessionsView: View {
                 }
                 .buttonStyle(.plain)
                 .help("打开 Claude Code")
+            } else if session.source.lowercased() == "codex" {
+                Button {
+                    openCodexDesktop(session)
+                } label: {
+                    Image(systemName: "arrow.up.right.square")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: 23, height: 23)
+                        .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .help("在 Codex 桌面打开此任务")
             }
 
             Button {
@@ -272,7 +357,7 @@ struct AgentSessionsView: View {
             .disabled(manager.closingSessionIDs.contains(session.id))
             .help(
                 session.isManaged
-                    ? "关闭任务并停止由灵动岛启动的 Claude 进程"
+                    ? "关闭任务并停止由灵动岛启动的进程"
                     : "从 Agent 中心移除任务；终端中的 Claude 会继续运行"
             )
         }
@@ -329,27 +414,32 @@ struct AgentSessionsView: View {
         }
     }
 
-    private func claudeComposer(for target: AgentSession?, showsTarget: Bool) -> some View {
+    private func agentComposer(for target: AgentSession?, showsTarget: Bool) -> some View {
+        let providerName = target.map { providerDisplayName($0.source) } ?? "Claude Code"
         HStack(spacing: 6) {
             Menu {
-                Button("新建对话") {
+                Button("新建 Claude 对话") {
                     manager.newConversation()
                     detailSessionID = nil
                 }
-                Button("在文件夹中新建…") { showsDirectoryPicker = true }
+                Button("在文件夹中新建 Claude 对话…") { showsDirectoryPicker = true }
 
                 if target != nil {
                     Divider()
                     Button("打开对话") {
                         if let target { openSession(target) }
                     }
-                    Button("清空并重新开始") { submitCommand("/clear", to: target) }
-                    Button("停止当前运行") { submitCommand("/stop", to: target) }
-                    Button("压缩上下文") { submitCommand("/compact", to: target) }
-                    Divider()
-                    Button("当前会话") { submitCommand("/current", to: target) }
-                    Button("查看对话列表") { submitCommand("/list", to: target) }
-                    Button("命令帮助") { submitCommand("/help", to: target) }
+                    if target?.source.lowercased() == "claude" {
+                        Button("清空并重新开始") { submitCommand("/clear", to: target) }
+                        Button("停止当前运行") { submitCommand("/stop", to: target) }
+                        Button("压缩上下文") { submitCommand("/compact", to: target) }
+                        Divider()
+                        Button("当前会话") { submitCommand("/current", to: target) }
+                        Button("查看对话列表") { submitCommand("/list", to: target) }
+                        Button("命令帮助") { submitCommand("/help", to: target) }
+                    } else {
+                        Button("停止当前运行") { submitCommand("/stop", to: target) }
+                    }
                 }
 
                 Divider()
@@ -391,6 +481,29 @@ struct AgentSessionsView: View {
                 }
             }
 
+            if showsTarget, !activeCodexSessionIDs.isEmpty {
+                Button {
+                    manager.refreshCodexUsage()
+                } label: {
+                    HStack(spacing: 3) {
+                        if manager.isRefreshingCodexUsage {
+                            ProgressView().controlSize(.mini).scaleEffect(0.55)
+                        } else {
+                            Image(systemName: "gauge.with.dots.needle.67percent")
+                                .font(.system(size: 7, weight: .medium))
+                        }
+                        Text(manager.codexUsage?.compactDisplayLabel ?? "Codex 额度")
+                            .font(.system(size: 7, weight: .medium, design: .rounded))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(manager.codexUsage?.error == nil ? Color.secondary : Color.orange)
+                    .fixedSize()
+                }
+                .buttonStyle(.plain)
+                .disabled(manager.isRefreshingCodexUsage)
+                .help(manager.codexUsage?.error ?? "Codex 活跃任务额度；点击刷新")
+            }
+
             TextField(composerPlaceholder(for: target), text: $draft)
                 .textFieldStyle(.plain)
                 .font(.system(size: showsTarget ? 11 : 12.5))
@@ -415,7 +528,7 @@ struct AgentSessionsView: View {
             }
             .buttonStyle(.plain)
             .disabled(!canSend)
-            .help(target == nil ? "发起 Claude Code 对话" : "发送到这个 Claude Code 任务")
+            .help(target == nil ? "发起 Claude Code 对话" : "发送到这个 \(providerName) 任务")
         }
         .padding(.horizontal, 4)
         .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
@@ -427,7 +540,8 @@ struct AgentSessionsView: View {
 
     private func composerPlaceholder(for target: AgentSession?) -> String {
         if target?.status == .waitingForAnswer { return "回复 Claude…" }
-        return target == nil ? "发起 Claude Code 对话…" : "给当前任务发送消息…"
+        guard let target else { return "发起 Claude Code 对话…" }
+        return "给当前 \(providerDisplayName(target.source)) 任务发送消息…"
     }
 
     private func sendDraft(to target: AgentSession?) {
@@ -462,10 +576,12 @@ struct AgentSessionsView: View {
 
     private func openSession(_ session: AgentSession) {
         detailSessionID = session.id
-        if session.source.lowercased() == "claude" {
-            manager.select(session)
-            focusComposer()
-        }
+        manager.select(session)
+        focusComposer()
+    }
+
+    private func providerDisplayName(_ source: String) -> String {
+        source.lowercased() == "codex" ? "Codex 桌面" : "Claude Code"
     }
 
     private func focusComposer() {
@@ -502,6 +618,28 @@ struct AgentSessionsView: View {
         manager.close(session)
     }
 
+    private func handleFileContextDrop(_ providers: [NSItemProvider], for session: AgentSession) -> Bool {
+        guard !providers.isEmpty else { return false }
+        detailSessionID = session.id
+        manager.select(session)
+        Task {
+            var references: [String] = []
+            for provider in providers {
+                if let fileURL = await provider.extractFileURL() {
+                    references.append("- 文件：\(fileURL.path)")
+                } else if let url = await provider.extractURL() {
+                    references.append(url.isFileURL ? "- 文件：\(url.path)" : "- 链接：\(url.absoluteString)")
+                } else if let text = await provider.extractText(), !text.isEmpty {
+                    references.append("- 内容：\(String(text.prefix(4_000)))")
+                }
+            }
+            guard !references.isEmpty else { return }
+            let prompt = "请结合我拖入的内容协助处理：\n\n\(references.joined(separator: "\n"))"
+            manager.sendMessage(prompt, to: session.id)
+        }
+        return true
+    }
+
     private func sourceIcon(for source: String) -> String {
         switch source.lowercased() {
         case "claude": return "c.circle.fill"
@@ -517,6 +655,10 @@ struct AgentSessionsView: View {
 private struct AgentConversationTimeline: View {
     let session: AgentSession
 
+    @State private var isOutlineExpanded = false
+    @State private var activeMessageID: UUID?
+    @State private var isFollowingLatest = true
+
     var body: some View {
         Group {
             if session.messages.isEmpty {
@@ -528,30 +670,53 @@ private struct AgentConversationTimeline: View {
                 .font(.system(size: 12))
             } else {
                 ScrollViewReader { proxy in
-                    ScrollView(.vertical, showsIndicators: false) {
-                        LazyVStack(spacing: 9) {
-                            ForEach(session.messages) { message in
-                                AgentMessageRow(
-                                    message: message,
-                                    isStreaming: message.id == session.messages.last?.id
-                                        && message.role == "assistant"
-                                        && (session.status == .active || session.status == .inProgress)
-                                )
-                                .equatable()
-                                .id(message.id)
+                    GeometryReader { viewport in
+                        ZStack(alignment: .trailing) {
+                            ScrollView(.vertical, showsIndicators: false) {
+                                LazyVStack(spacing: 9) {
+                                    ForEach(session.messages) { message in
+                                        AgentMessageRow(
+                                            message: message,
+                                            isStreaming: message.id == session.messages.last?.id
+                                                && message.role == "assistant"
+                                                && (session.status == .active || session.status == .inProgress)
+                                        )
+                                        .equatable()
+                                        .background {
+                                            GeometryReader { geometry in
+                                                Color.clear.preference(
+                                                    key: AgentMessageFramePreferenceKey.self,
+                                                    value: [message.id: geometry.frame(in: .named("agentConversationViewport"))]
+                                                )
+                                            }
+                                        }
+                                        .id(message.id)
+                                    }
+                                }
+                                .padding(.leading, 2)
+                                .padding(.trailing, 17)
+                                .padding(.vertical, 1)
                             }
+                            .coordinateSpace(name: "agentConversationViewport")
+                            .onPreferenceChange(AgentMessageFramePreferenceKey.self) { frames in
+                                updateScrollPosition(frames, viewportHeight: viewport.size.height)
+                            }
+
+                            conversationOutline(using: proxy)
                         }
-                        .padding(.horizontal, 2)
-                        .padding(.vertical, 1)
                     }
                     .onAppear {
                         scrollToLatest(session: session, using: proxy, animated: false)
                     }
                     .onChange(of: session.messages.count) { _, _ in
-                        scrollToLatest(session: session, using: proxy, animated: true)
+                        if isFollowingLatest || session.messages.last?.role == "user" {
+                            scrollToLatest(session: session, using: proxy, animated: true)
+                        }
                     }
                     .onChange(of: session.messages.last?.text) { _, _ in
-                        scrollToLatest(session: session, using: proxy, animated: false)
+                        if isFollowingLatest {
+                            scrollToLatest(session: session, using: proxy, animated: true)
+                        }
                     }
                 }
             }
@@ -568,6 +733,163 @@ private struct AgentConversationTimeline: View {
         } else {
             proxy.scrollTo(identifier, anchor: .bottom)
         }
+    }
+
+    @ViewBuilder
+    private func conversationOutline(using proxy: ScrollViewProxy) -> some View {
+        if !session.messages.isEmpty {
+            HStack(spacing: 8) {
+                if isOutlineExpanded {
+                    VStack(alignment: .leading, spacing: 7) {
+                        HStack {
+                            Text("对话目录")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Color.black.opacity(0.78))
+                            Spacer(minLength: 4)
+                            Button {
+                                guard let latestID = session.messages.last?.id else { return }
+                                withAnimation(.easeInOut(duration: 0.24)) {
+                                    proxy.scrollTo(latestID, anchor: .bottom)
+                                }
+                            } label: {
+                                Image(systemName: "arrow.down.to.line")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(Color.black.opacity(0.55))
+                                    .frame(width: 22, height: 20)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("跳到最新消息")
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.top, 8)
+
+                        ScrollViewReader { outlineProxy in
+                            ScrollView(.vertical, showsIndicators: false) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    ForEach(Array(session.messages.enumerated()), id: \.element.id) { index, message in
+                                        Button {
+                                            withAnimation(.easeInOut(duration: 0.24)) {
+                                                proxy.scrollTo(message.id, anchor: .top)
+                                            }
+                                        } label: {
+                                            HStack(spacing: 6) {
+                                                Circle()
+                                                    .fill(message.role == "user" ? Color.blue : Color.gray.opacity(0.65))
+                                                    .frame(width: 5, height: 5)
+                                                Text(outlineTitle(for: message, index: index))
+                                                    .font(.system(size: 10, weight: message.role == "user" ? .medium : .regular))
+                                                    .lineLimit(1)
+                                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                            }
+                                            .foregroundStyle(Color.black.opacity(0.78))
+                                            .padding(.horizontal, 9)
+                                            .padding(.vertical, 6)
+                                            .contentShape(Rectangle())
+                                        }
+                                        .buttonStyle(.plain)
+                                        .background(
+                                            message.id == activeMessageID ? Color.blue.opacity(0.12) : Color.black.opacity(0.045),
+                                            in: RoundedRectangle(cornerRadius: 7)
+                                        )
+                                        .id(message.id)
+                                    }
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.bottom, 7)
+                            }
+                            .onAppear {
+                                outlineProxy.scrollTo(activeMessageID ?? session.messages.last?.id, anchor: .center)
+                            }
+                            .onChange(of: activeMessageID) { _, identifier in
+                                guard let identifier else { return }
+                                withAnimation(.easeOut(duration: 0.16)) {
+                                    outlineProxy.scrollTo(identifier, anchor: .center)
+                                }
+                            }
+                        }
+                    }
+                    .frame(width: 190, height: min(270, max(130, CGFloat(session.messages.count) * 28 + 42)))
+                    .background(.white, in: RoundedRectangle(cornerRadius: 14))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 14)
+                            .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                    }
+                    .shadow(color: .black.opacity(0.22), radius: 16, y: 5)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
+
+                GeometryReader { geometry in
+                    ZStack(alignment: .top) {
+                        Capsule()
+                            .fill(Color.white.opacity(0.72))
+                            .frame(width: 2, height: geometry.size.height * 0.72)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        ForEach(Array(session.messages.enumerated()), id: \.element.id) { index, message in
+                            Capsule()
+                                .fill(Color.white.opacity(message.id == activeMessageID ? 1 : 0.48))
+                                .frame(width: message.id == activeMessageID ? 12 : (index.isMultiple(of: 4) ? 9 : 5), height: message.id == activeMessageID ? 3 : 2)
+                                .position(
+                                    x: geometry.size.width / 2,
+                                    y: markerY(index: index, count: session.messages.count, height: geometry.size.height)
+                                )
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .frame(width: 14)
+                .padding(.vertical, 15)
+            }
+            .padding(.trailing, 1)
+            .frame(maxHeight: .infinity, alignment: .center)
+            .onHover { hovering in
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                    isOutlineExpanded = hovering
+                }
+            }
+            .help("悬停查看对话目录，点击跳转")
+        }
+    }
+
+    private func markerY(index: Int, count: Int, height: CGFloat) -> CGFloat {
+        guard count > 1 else { return height / 2 }
+        return 9 + CGFloat(index) / CGFloat(count - 1) * max(0, height - 18)
+    }
+
+    private func updateScrollPosition(_ frames: [UUID: CGRect], viewportHeight: CGFloat) {
+        guard !frames.isEmpty else { return }
+        let visibleFrames = frames.filter { $0.value.maxY > 0 && $0.value.minY < viewportHeight }
+        if let current = visibleFrames.min(by: { lhs, rhs in
+            let lhsDistance = lhs.value.minY >= 0 ? lhs.value.minY : abs(lhs.value.maxY)
+            let rhsDistance = rhs.value.minY >= 0 ? rhs.value.minY : abs(rhs.value.maxY)
+            return lhsDistance < rhsDistance
+        }) {
+            activeMessageID = current.key
+        }
+        if let lastID = session.messages.last?.id, let lastFrame = frames[lastID] {
+            isFollowingLatest = lastFrame.maxY <= viewportHeight + 48
+        } else {
+            isFollowingLatest = false
+        }
+    }
+
+    private func outlineTitle(for message: AgentMessage, index: Int) -> String {
+        let role = message.role == "user" ? "我" : (message.role == "assistant" ? "Claude" : "提示")
+        let firstLine = message.text
+            .components(separatedBy: .newlines)
+            .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "#*- `>")) ?? ""
+        let title = firstLine.isEmpty ? "消息 \(index + 1)" : String(firstLine.prefix(32))
+        return "\(role)：\(title)"
+    }
+}
+
+private struct AgentMessageFramePreferenceKey: PreferenceKey {
+    static var defaultValue: [UUID: CGRect] = [:]
+
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
     }
 }
 
@@ -592,8 +914,8 @@ private struct AgentMessageRow: View, Equatable {
             }
             .padding(.vertical, 2)
         } else {
-            HStack(alignment: .bottom, spacing: 5) {
-                if isUser { Spacer(minLength: 52) }
+            HStack(alignment: .bottom, spacing: 0) {
+                if isUser { Spacer(minLength: 38) }
 
                 VStack(alignment: isUser ? .trailing : .leading, spacing: 2) {
                     HStack(spacing: 4) {
@@ -612,15 +934,17 @@ private struct AgentMessageRow: View, Equatable {
 
                     AgentMarkdownContent(
                         text: message.text.isEmpty ? "…" : message.text,
-                        isError: isError
+                        isError: isError,
+                        messageID: message.id
                     )
                 }
                 .padding(.horizontal, 11)
                 .padding(.vertical, 8)
                 .background(bubbleColor, in: RoundedRectangle(cornerRadius: 11))
 
-                if !isUser { Spacer(minLength: 52) }
+                if !isUser { Spacer(minLength: 38) }
             }
+            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
         }
     }
 
@@ -652,6 +976,7 @@ private struct AgentMessageRow: View, Equatable {
 private struct AgentMarkdownContent: View, Equatable {
     let text: String
     let isError: Bool
+    let messageID: UUID
 
     private struct Block: Identifiable {
         enum Kind {
@@ -661,6 +986,7 @@ private struct AgentMarkdownContent: View, Equatable {
             case numbered(marker: String)
             case quote
             case divider
+            case math
             case code(language: String?)
             case table(headers: [String], rows: [[String]])
         }
@@ -702,6 +1028,27 @@ private struct AgentMarkdownContent: View, Equatable {
                     isCode = true
                     let language = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
                     codeLanguage = language.isEmpty ? nil : language
+                }
+            } else if !isCode && (trimmed.hasPrefix("$$") || trimmed.hasPrefix("\\[")) {
+                appendBlock(kind: .paragraph, lines: &lines)
+                let delimiter = trimmed.hasPrefix("$$") ? "$$" : "\\["
+                let closingDelimiter = delimiter == "$$" ? "$$" : "\\]"
+                let first = String(trimmed.dropFirst(delimiter.count))
+                if let end = first.range(of: closingDelimiter) {
+                    appendSingle(kind: .math, content: String(first[..<end.lowerBound]))
+                } else {
+                    var formulaLines = [first]
+                    lineIndex += 1
+                    while lineIndex < sourceLines.count {
+                        let formulaLine = sourceLines[lineIndex]
+                        if let end = formulaLine.range(of: closingDelimiter) {
+                            formulaLines.append(String(formulaLine[..<end.lowerBound]))
+                            break
+                        }
+                        formulaLines.append(formulaLine)
+                        lineIndex += 1
+                    }
+                    appendSingle(kind: .math, content: formulaLines.joined(separator: "\n"))
                 }
             } else if isCode {
                 lines.append(line)
@@ -756,16 +1103,15 @@ private struct AgentMarkdownContent: View, Equatable {
             ForEach(blocks) { block in
                 switch block.kind {
                 case .paragraph:
-                    Text(inlineMarkdown: block.content)
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(isError ? Color.red : Color.primary)
+                    AgentInlineMarkdown(source: block.content, fontSize: 12.5, color: isError ? .red : .primary)
                         .lineSpacing(1.5)
-                        .fixedSize(horizontal: false, vertical: true)
                 case .heading(let level):
-                    Text(inlineMarkdown: block.content)
-                        .font(.system(size: headingSize(level), weight: .bold))
-                        .foregroundStyle(isError ? Color.red : Color.primary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    AgentInlineMarkdown(
+                        source: block.content,
+                        fontSize: headingSize(level),
+                        color: isError ? .red : .primary,
+                        weight: .bold
+                    )
                 case .bullet:
                     listRow(marker: "•", content: block.content)
                 case .numbered(let marker):
@@ -775,18 +1121,29 @@ private struct AgentMarkdownContent: View, Equatable {
                         Capsule()
                             .fill(Color.white.opacity(0.24))
                             .frame(width: 2)
-                        Text(inlineMarkdown: block.content)
-                            .font(.system(size: 12))
-                            .foregroundStyle(isError ? Color.red : Color.secondary)
-                            .italic()
+                        AgentInlineMarkdown(
+                            source: block.content,
+                            fontSize: 12,
+                            color: isError ? .red : .secondary,
+                            italic: true
+                        )
                     }
                 case .divider:
                     Divider().opacity(0.25)
+                case .math:
+                    Math(block.content)
+                        .mathFont(Math.Font(name: .latinModern, size: 16))
+                        .mathTypesettingStyle(.display)
+                        .foregroundStyle(isError ? Color.red : Color.primary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 5)
+                        .fixedSize(horizontal: false, vertical: true)
                 case .code(let language):
                     codeBlock(block.content, language: language)
                 case .table(let headers, let rows):
                     markdownTable(headers: headers, rows: rows)
                 }
+                .id("\(messageID.uuidString)-block-\(block.id)")
             }
         }
         .textSelection(.enabled)
@@ -863,9 +1220,12 @@ private struct AgentMarkdownContent: View, Equatable {
     private func tableRow(cells: [String], isHeader: Bool, shaded: Bool = false) -> some View {
         HStack(alignment: .top, spacing: 0) {
             ForEach(Array(cells.enumerated()), id: \.offset) { index, cell in
-                Text(inlineMarkdown: cell)
-                    .font(.system(size: 11.5, weight: isHeader ? .semibold : .regular))
-                    .foregroundStyle(isError ? Color.red : Color.primary)
+                AgentInlineMarkdown(
+                    source: cell,
+                    fontSize: 11.5,
+                    color: isError ? .red : .primary,
+                    weight: isHeader ? .semibold : .regular
+                )
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(width: 150, alignment: .leading)
                     .padding(.horizontal, 8)
@@ -893,10 +1253,7 @@ private struct AgentMarkdownContent: View, Equatable {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 10, alignment: .trailing)
-            Text(inlineMarkdown: content)
-                .font(.system(size: 12.5))
-                .foregroundStyle(isError ? Color.red : Color.primary)
-                .fixedSize(horizontal: false, vertical: true)
+            AgentInlineMarkdown(source: content, fontSize: 12.5, color: isError ? .red : .primary)
         }
     }
 
@@ -955,11 +1312,158 @@ private extension Text {
     }
 }
 
+private struct AgentInlineMarkdown: View {
+    let source: String
+    let fontSize: CGFloat
+    let color: Color
+    var weight: Font.Weight = .regular
+    var italic = false
+
+    private static let formulaExpression = try? NSRegularExpression(
+        pattern: #"(?<!\$)\$\$([\s\S]+?)\$\$(?!\$)|(?<!\\)\$(?!\$)([^$\n]+)\$|\\\((.*?)\\\)|\\\[([\s\S]*?)\\\]"#
+    )
+
+    private struct Segment: Identifiable {
+        let id: Int
+        let text: String
+        let isFormula: Bool
+    }
+
+    private var segments: [Segment] {
+        guard let expression = Self.formulaExpression else {
+            return [Segment(id: 0, text: source, isFormula: false)]
+        }
+        let nsSource = source as NSString
+        let matches = expression.matches(in: source, range: NSRange(location: 0, length: nsSource.length))
+        guard !matches.isEmpty else { return [Segment(id: 0, text: source, isFormula: false)] }
+
+        var result: [Segment] = []
+        var cursor = 0
+        for match in matches {
+            if match.range.location > cursor {
+                result.append(Segment(
+                    id: result.count,
+                    text: nsSource.substring(with: NSRange(location: cursor, length: match.range.location - cursor)),
+                    isFormula: false
+                ))
+            }
+            let formula = (1..<match.numberOfRanges).compactMap { index -> String? in
+                let range = match.range(at: index)
+                return range.location == NSNotFound ? nil : nsSource.substring(with: range)
+            }.first(where: { !$0.isEmpty }) ?? ""
+            result.append(Segment(id: result.count, text: formula, isFormula: true))
+            cursor = NSMaxRange(match.range)
+        }
+        if cursor < nsSource.length {
+            result.append(Segment(
+                id: result.count,
+                text: nsSource.substring(from: cursor),
+                isFormula: false
+            ))
+        }
+        return result
+    }
+
+    var body: some View {
+        if !segments.contains(where: \.isFormula) {
+            markdownText(source)
+        } else {
+            InlineFormulaFlowLayout(horizontalSpacing: 1, verticalSpacing: 2) {
+                ForEach(segments) { segment in
+                    if segment.isFormula {
+                        Math(segment.text)
+                            .mathFont(Math.Font(name: .latinModern, size: fontSize + 1))
+                            .mathTypesettingStyle(.text)
+                            .foregroundStyle(color)
+                    } else {
+                        markdownText(segment.text)
+                    }
+                }
+            }
+        }
+    }
+
+    private func markdownText(_ value: String) -> some View {
+        Text(inlineMarkdown: value)
+            .font(.system(size: fontSize, weight: weight))
+            .italic(italic)
+            .foregroundStyle(color)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+private struct InlineFormulaFlowLayout: Layout {
+    let horizontalSpacing: CGFloat
+    let verticalSpacing: CGFloat
+
+    private struct Placement {
+        let origin: CGPoint
+        let size: CGSize
+    }
+
+    private struct Measurement {
+        let size: CGSize
+        let placements: [Placement]
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        measure(proposal: proposal, subviews: subviews).size
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        let result = measure(proposal: ProposedViewSize(width: bounds.width, height: proposal.height), subviews: subviews)
+        for (subview, placement) in zip(subviews, result.placements) {
+            subview.place(
+                at: CGPoint(x: bounds.minX + placement.origin.x, y: bounds.minY + placement.origin.y),
+                proposal: ProposedViewSize(width: placement.size.width, height: placement.size.height)
+            )
+        }
+    }
+
+    private func measure(proposal: ProposedViewSize, subviews: Subviews) -> Measurement {
+        let maximumWidth = max(1, proposal.width ?? 620)
+        var placements: [Placement] = []
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var lineHeight: CGFloat = 0
+        var widestLine: CGFloat = 0
+
+        for subview in subviews {
+            var size = subview.sizeThatFits(.unspecified)
+            if size.width > maximumWidth {
+                size = subview.sizeThatFits(ProposedViewSize(width: maximumWidth, height: nil))
+            }
+            if x > 0, x + horizontalSpacing + size.width > maximumWidth {
+                widestLine = max(widestLine, x)
+                y += lineHeight + verticalSpacing
+                x = 0
+                lineHeight = 0
+            }
+            if x > 0 { x += horizontalSpacing }
+            placements.append(Placement(origin: CGPoint(x: x, y: y), size: size))
+            x += size.width
+            lineHeight = max(lineHeight, size.height)
+        }
+
+        return Measurement(
+            size: CGSize(width: min(maximumWidth, max(widestLine, x)), height: y + lineHeight),
+            placements: placements
+        )
+    }
+}
+
 private struct AgentSessionCard: View {
     let session: AgentSession
     let isSelected: Bool
     let isClosing: Bool
+    let onDropContext: ([NSItemProvider]) -> Bool
     let onOpen: () -> Void
+    @State private var isDropTargeted = false
 
     private var cardWidth: CGFloat { session.status.needsAttention ? 214 : 180 }
 
@@ -971,7 +1475,7 @@ private struct AgentSessionCard: View {
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(session.status.color)
 
-                    Text(session.source.capitalized)
+                    Text(session.source.lowercased() == "codex" ? "Codex 桌面" : "Claude Code")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
 
@@ -1017,7 +1521,7 @@ private struct AgentSessionCard: View {
                         Text("打开处理")
                             .font(.system(size: 8, weight: .medium))
                             .foregroundStyle(session.status.color)
-                    } else if session.source.lowercased() == "claude" {
+                    } else if ["claude", "codex"].contains(session.source.lowercased()) {
                         Image(systemName: "bubble.left.and.bubble.right.fill")
                             .font(.system(size: 7))
                             .foregroundStyle(.tertiary)
@@ -1045,13 +1549,14 @@ private struct AgentSessionCard: View {
             .background(Color(nsColor: .secondarySystemFill).opacity(0.72), in: RoundedRectangle(cornerRadius: 12))
             .overlay {
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke(borderColor, lineWidth: isSelected ? 1.5 : 1)
+                    .stroke(isDropTargeted ? Color.accentColor : borderColor, lineWidth: isSelected || isDropTargeted ? 1.5 : 1)
             }
             .contentShape(RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
         .disabled(isClosing)
-        .help(session.source.lowercased() == "claude" ? "打开 Claude 实时对话" : "打开任务详情")
+        .onDrop(of: [.fileURL, .url, .utf8PlainText, .plainText], isTargeted: $isDropTargeted, perform: onDropContext)
+        .help("打开\(session.source.lowercased() == "codex" ? "Codex 桌面" : "Claude Code")实时任务详情")
         .contextMenu {
             Button {
                 onOpen()
@@ -1064,6 +1569,20 @@ private struct AgentSessionCard: View {
                     AgentSessionManager.shared.jumpToTerminal(session)
                 } label: {
                     Label("打开 Claude Code", systemImage: "terminal")
+                }
+
+                if session.status == .active || session.status == .inProgress {
+                    Button {
+                        AgentSessionManager.shared.sendMessage("/stop", to: session.id)
+                    } label: {
+                        Label("停止当前运行", systemImage: "stop.circle")
+                    }
+                }
+            } else if session.source.lowercased() == "codex" {
+                Button {
+                    openCodexDesktop(session)
+                } label: {
+                    Label("在 Codex 桌面打开", systemImage: "arrow.up.right.square")
                 }
 
                 if session.status == .active || session.status == .inProgress {
@@ -1121,6 +1640,11 @@ private struct AgentSessionCard: View {
         case "opencode": return "curlybraces.square.fill"
         default: return "terminal.fill"
         }
+    }
+
+    private func openCodexDesktop(_ session: AgentSession) {
+        guard let url = URL(string: "codex://threads/\(session.id)") else { return }
+        NSWorkspace.shared.open(url)
     }
 }
 

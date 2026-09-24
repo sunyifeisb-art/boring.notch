@@ -12,6 +12,8 @@ final class AgentSessionManager: ObservableObject {
     @Published private(set) var sessions: [AgentSession] = []
     @Published private(set) var bridgeError: String?
     @Published private(set) var hookInstallMessages: [String] = []
+    @Published private(set) var codexUsage: AgentUsageSnapshot?
+    @Published private(set) var isRefreshingCodexUsage = false
     @Published private(set) var isInstallingHooks = false
     @Published private(set) var closingSessionIDs = Set<String>()
     @Published var selectedSessionID: String?
@@ -22,6 +24,8 @@ final class AgentSessionManager: ObservableObject {
     private var attentionSessionIDs = Set<String>()
     private var lastBridgeRevision: UInt64?
     private var refreshInProgress = false
+    private var lastAutomaticCodexUsageRefresh: Date?
+    private var lastAutomaticCodexUsageSessionIDs = Set<String>()
 
     var attentionSession: AgentSession? {
         agentSessions.first(where: { $0.status.needsAttention })
@@ -35,8 +39,8 @@ final class AgentSessionManager: ObservableObject {
         sessions.filter { ["claude", "codex"].contains($0.source.lowercased()) }
     }
 
-    var claudeSessions: [AgentSession] {
-        sessions.filter { $0.source.lowercased() == "claude" }
+    var selectedAgentSession: AgentSession? {
+        agentSessions.first(where: { $0.id == selectedSessionID })
     }
 
     var hookInstallSummary: String? {
@@ -53,9 +57,15 @@ final class AgentSessionManager: ObservableObject {
             bridgeError = await XPCHelperClient.shared.startAgentBridge()
             while !Task.isCancelled {
                 await refreshSessions()
-                let interval = agentSessions.contains(where: { $0.status == .active || $0.status == .inProgress })
-                    ? 350
-                    : 1_000
+                let activeSessions = agentSessions.filter { $0.status == .active || $0.status == .inProgress }
+                let interval: Int
+                if activeSessions.contains(where: \.isManaged) {
+                    interval = 200
+                } else if !activeSessions.isEmpty {
+                    interval = 350
+                } else {
+                    interval = 1_000
+                }
                 try? await Task.sleep(for: .milliseconds(interval))
             }
         }
@@ -65,6 +75,11 @@ final class AgentSessionManager: ObservableObject {
         pollingTask?.cancel()
         pollingTask = nil
         lastBridgeRevision = nil
+        sessions.removeAll(keepingCapacity: false)
+        attentionSessionIDs.removeAll(keepingCapacity: false)
+        selectedSessionID = nil
+        requestedOpenSessionID = nil
+        codexUsage = nil
         XPCHelperClient.shared.stopAgentBridge()
     }
 
@@ -93,7 +108,6 @@ final class AgentSessionManager: ObservableObject {
         let previousChromeSignature = chromeSignature(for: sessions)
         let previousActive = Set(agentSessions.filter { $0.status != .completed }.map(\.id))
         let updatedAgentSessions = updatedSessions.filter { ["claude", "codex"].contains($0.source.lowercased()) }
-        let updatedClaudeSessions = updatedAgentSessions.filter { $0.source.lowercased() == "claude" }
         let updatedActive = Set(updatedAgentSessions.filter { $0.status != .completed }.map(\.id))
         let newActive = updatedActive.subtracting(previousActive)
         let updatedAttention = Set(updatedAgentSessions.filter { $0.status.needsAttention }.map(\.id))
@@ -101,7 +115,7 @@ final class AgentSessionManager: ObservableObject {
         sessions = updatedSessions
         attentionSessionIDs = updatedAttention
         if let selectedSessionID,
-           !updatedSessions.contains(where: { $0.id == selectedSessionID && $0.source.lowercased() == "claude" })
+           !updatedSessions.contains(where: { $0.id == selectedSessionID && ["claude", "codex"].contains($0.source.lowercased()) })
         {
             self.selectedSessionID = nil
         }
@@ -109,7 +123,7 @@ final class AgentSessionManager: ObservableObject {
         let autoSelectNewest = UserDefaults.standard.object(forKey: "agentIslandAutoSelectNewest") as? Bool ?? true
         if autoSelectNewest,
            (selectedSessionID == nil || !newActive.isEmpty),
-           let newest = updatedClaudeSessions.first(where: { $0.status != .completed })
+           let newest = updatedAgentSessions.first(where: { $0.status != .completed })
         {
             selectedSessionID = newest.id
         }
@@ -123,6 +137,35 @@ final class AgentSessionManager: ObservableObject {
         if chromeSignature(for: updatedSessions) != previousChromeSignature {
             NotificationCenter.default.post(name: .agentChromeStateChanged, object: nil)
         }
+    }
+
+    func refreshCodexUsage() {
+        guard !isRefreshingCodexUsage else { return }
+        isRefreshingCodexUsage = true
+        Task {
+            let data = await XPCHelperClient.shared.codexUsageJSON()
+            codexUsage = try? JSONDecoder().decode(AgentUsageSnapshot.self, from: data)
+            isRefreshingCodexUsage = false
+        }
+    }
+
+    func refreshCodexUsageIfNeeded(activeSessionIDs: [String]) {
+        let activeIDs = Set(activeSessionIDs)
+        guard !activeIDs.isEmpty else {
+            lastAutomaticCodexUsageSessionIDs.removeAll(keepingCapacity: false)
+            return
+        }
+        guard !isRefreshingCodexUsage else { return }
+        let activeTasksChanged = activeIDs != lastAutomaticCodexUsageSessionIDs
+        if !activeTasksChanged,
+           let lastAutomaticCodexUsageRefresh,
+           Date().timeIntervalSince(lastAutomaticCodexUsageRefresh) < 5 * 60
+        {
+            return
+        }
+        lastAutomaticCodexUsageSessionIDs = activeIDs
+        lastAutomaticCodexUsageRefresh = Date()
+        refreshCodexUsage()
     }
 
     private func chromeSignature(for sessions: [AgentSession]) -> [String] {
@@ -195,7 +238,7 @@ final class AgentSessionManager: ObservableObject {
     }
 
     func select(_ session: AgentSession) {
-        guard session.source.lowercased() == "claude" else { return }
+        guard ["claude", "codex"].contains(session.source.lowercased()) else { return }
         selectedSessionID = session.id
     }
 
@@ -219,22 +262,72 @@ final class AgentSessionManager: ObservableObject {
         }
     }
 
-    func sendMessage(_ text: String, to sessionID: String? = nil, cwd: String? = nil) {
+    func sendMessage(
+        _ text: String,
+        to sessionID: String? = nil,
+        cwd: String? = nil,
+        source preferredSource: String? = nil,
+        openInIsland: Bool = false
+    ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let targetID = sessionID ?? selectedSessionID
-        let selected = sessions.first(where: { $0.id == targetID && $0.source.lowercased() == "claude" })
+        let selected = sessions.first(where: {
+            $0.id == targetID
+                && ["claude", "codex"].contains($0.source.lowercased())
+                && (preferredSource == nil || $0.source.lowercased() == preferredSource?.lowercased())
+        }) ?? preferredSource.flatMap { source in
+            sessions.first(where: {
+                $0.source.lowercased() == source.lowercased()
+                    && [.active, .inProgress, .pending, .idle].contains($0.status)
+            })
+        }
+        let source = selected?.source.lowercased() ?? preferredSource?.lowercased() ?? "claude"
+
+        guard source != "codex" || selected != nil else {
+            bridgeError = "没有可接收文件上下文的 Codex 桌面任务。请先启动一个 Codex 任务。"
+            return
+        }
 
         Task {
             let identifier = await XPCHelperClient.shared.sendAgentMessage(
                 sessionID: selected?.id,
-                source: "claude",
+                source: source,
                 cwd: selected?.cwd ?? cwd,
                 message: trimmed
             )
-            if let identifier { selectedSessionID = identifier }
+            if let identifier {
+                selectedSessionID = identifier
+                if openInIsland {
+                    requestedOpenSessionID = identifier
+                    BoringViewCoordinator.shared.currentView = .agents
+                }
+            }
             await refreshSessions()
         }
+    }
+
+    func sendShelfItemsToAgent(_ items: [ShelfItem], source: String) {
+        guard !items.isEmpty else { return }
+        let references = items.compactMap { item -> String? in
+            switch item.kind {
+            case .file:
+                guard let url = ShelfStateViewModel.shared.resolveAndUpdateBookmark(for: item) else { return nil }
+                return "- 文件：\(url.path)"
+            case .link(let url):
+                return "- 链接：\(url.absoluteString)"
+            case .text(let text):
+                return "- 文本：\(String(text.prefix(2_000)))"
+            }
+        }
+        guard !references.isEmpty else { return }
+        let prompt = "请查看并处理以下来自文件储存器的内容，先阅读文件或链接，再按我的要求协助：\n\n\(references.joined(separator: "\n"))"
+        let preferredItem = items.first(where: { if case .file = $0.kind { return true }; return false })
+        let cwd = preferredItem.flatMap { item -> String? in
+            guard let url = ShelfStateViewModel.shared.resolveFileURL(for: item) else { return nil }
+            return url.deletingLastPathComponent().path
+        }
+        sendMessage(prompt, cwd: cwd, source: source, openInIsland: true)
     }
 
     func close(_ session: AgentSession) {
@@ -247,7 +340,7 @@ final class AgentSessionManager: ObservableObject {
             await refreshSessions()
             closingSessionIDs.remove(sessionID)
             if selectedSessionID == nil {
-                selectedSessionID = sessions.first(where: { $0.source.lowercased() == "claude" })?.id
+                selectedSessionID = sessions.first(where: { ["claude", "codex"].contains($0.source.lowercased()) })?.id
             }
         }
     }

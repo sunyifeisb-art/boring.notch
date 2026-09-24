@@ -25,6 +25,8 @@ import Foundation
     func stopAgentBridge()
     func agentSessionsRevision(with reply: @escaping (NSNumber) -> Void)
     func agentSessionsJSON(with reply: @escaping (NSData) -> Void)
+    func codexUsageJSON(with reply: @escaping (NSData) -> Void)
+    func widgetCatalogJSON(with reply: @escaping (NSData) -> Void)
     func respondToAgent(_ sessionID: String, responseJSON: NSData, with reply: @escaping (Bool) -> Void)
     func installAgentHooks(with reply: @escaping (NSArray) -> Void)
     func jumpToAgentTerminal(_ sessionID: String, with reply: @escaping (Bool) -> Void)

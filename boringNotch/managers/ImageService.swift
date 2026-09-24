@@ -19,7 +19,9 @@ public final class ImageService: ImageServiceProtocol {
 
     private init() {
         let config = URLSessionConfiguration.default
-        let cache = URLCache(memoryCapacity: 50 * 1024 * 1024, // 50MB
+        // Artwork is small and short-lived. Keep the in-memory budget modest;
+        // the disk cache handles reuse without reserving 50 MB in the app.
+        let cache = URLCache(memoryCapacity: 8 * 1024 * 1024, // 8 MB
                              diskCapacity: 100 * 1024 * 1024, // 100MB
                              diskPath: "artwork_cache")
         config.urlCache = cache

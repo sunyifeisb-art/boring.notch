@@ -162,6 +162,31 @@ struct AgentMessage: Identifiable, Codable, Equatable, Sendable {
     let createdAt: Date
 }
 
+struct AgentUsageSnapshot: Codable, Equatable, Sendable {
+    let fiveHourRemainingPercent: Int?
+    let weeklyRemainingPercent: Int?
+    let updatedAt: String?
+    let error: String?
+
+    var displayLabel: String {
+        guard error == nil else { return "Codex 额度暂不可用" }
+        let periods = [
+            fiveHourRemainingPercent.map { "5 小时 \($0)%" },
+            weeklyRemainingPercent.map { "周额度 \($0)%" }
+        ].compactMap { $0 }
+        return periods.isEmpty ? "Codex 额度暂不可用" : periods.joined(separator: " · ")
+    }
+
+    var compactDisplayLabel: String {
+        guard error == nil else { return "额度不可用" }
+        let periods = [
+            fiveHourRemainingPercent.map { "5h \($0)%" },
+            weeklyRemainingPercent.map { "周 \($0)%" }
+        ].compactMap { $0 }
+        return periods.isEmpty ? "额度不可用" : periods.joined(separator: " · ")
+    }
+}
+
 struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     let id: String
     var source: String
@@ -176,6 +201,7 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
     var tty: String?
     var terminalBundleID: String?
     var resumeID: String?
+    var turnID: String?
     var isManaged: Bool
     var messages: [AgentMessage]
     let startedAt: Date
@@ -199,7 +225,7 @@ struct AgentSession: Identifiable, Codable, Equatable, Sendable {
         // Claude cards should prioritize the actual streaming reply. Tool names
         // are useful fallback state, but hiding the reply behind "Bash"/"Read"
         // makes the island look stuck while Claude is actively answering.
-        if source.lowercased() == "claude", let text = liveAssistantText {
+        if ["claude", "codex"].contains(source.lowercased()), let text = liveAssistantText {
             return text
         }
         if let toolName, !toolName.isEmpty {

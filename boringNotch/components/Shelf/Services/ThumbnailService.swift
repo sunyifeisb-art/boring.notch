@@ -13,17 +13,31 @@ import UniformTypeIdentifiers
 actor ThumbnailService {
     static let shared = ThumbnailService()
 
-    private var cache: [String: NSImage] = [:]
+    private struct CachedThumbnail {
+        let image: NSImage
+        let path: String
+        let estimatedCost: Int
+        var lastAccess: UInt64
+    }
+
+    private var cache: [String: CachedThumbnail] = [:]
+    private var cachedCost = 0
+    private var accessCounter: UInt64 = 0
     private var pendingRequests: [String: Task<NSImage?, Never>] = [:]
     private let thumbnailGenerator = QLThumbnailGenerator.shared
+    private let maximumCacheEntries = 64
+    private let maximumCacheCost = 16 * 1024 * 1024
 
     private init() {}
     
     func thumbnail(for url: URL, size: CGSize) async -> NSImage? {
         let cacheKey = "\(url.path)_\(size.width)x\(size.height)"
         
-        if let cached = cache[cacheKey] {
-            return cached
+        if var cached = cache[cacheKey] {
+            accessCounter &+= 1
+            cached.lastAccess = accessCounter
+            cache[cacheKey] = cached
+            return cached.image
         }
         
         if let pending = pendingRequests[cacheKey] {
@@ -33,7 +47,7 @@ actor ThumbnailService {
         let task = Task<NSImage?, Never> {
             let thumbnail = await generateQuickLookThumbnail(for: url, size: size)
             if let thumbnail = thumbnail {
-                cache[cacheKey] = thumbnail
+                self.insert(thumbnail, for: cacheKey, path: url.path, size: size)
             }
             pendingRequests[cacheKey] = nil
             return thumbnail
@@ -45,10 +59,41 @@ actor ThumbnailService {
     
     func clearCache() {
         cache.removeAll()
+        cachedCost = 0
     }
-    
+
     func clearCache(for url: URL) {
-        cache = cache.filter { !$0.key.starts(with: url.path) }
+        let keys = cache.compactMap { key, entry in
+            entry.path == url.path ? key : nil
+        }
+        for key in keys {
+            if let removed = cache.removeValue(forKey: key) {
+                cachedCost -= removed.estimatedCost
+            }
+        }
+    }
+
+    private func insert(_ image: NSImage, for key: String, path: String, size: CGSize) {
+        accessCounter &+= 1
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let estimatedCost = max(1, Int(size.width * size.height * scale * scale * 4))
+        if let replaced = cache.removeValue(forKey: key) {
+            cachedCost -= replaced.estimatedCost
+        }
+        cache[key] = CachedThumbnail(
+            image: image,
+            path: path,
+            estimatedCost: estimatedCost,
+            lastAccess: accessCounter
+        )
+        cachedCost += estimatedCost
+
+        while cache.count > maximumCacheEntries || cachedCost > maximumCacheCost {
+            guard let oldestKey = cache.min(by: { $0.value.lastAccess < $1.value.lastAccess })?.key,
+                  let evicted = cache.removeValue(forKey: oldestKey)
+            else { break }
+            cachedCost -= evicted.estimatedCost
+        }
     }
     
     // MARK: - Private Methods

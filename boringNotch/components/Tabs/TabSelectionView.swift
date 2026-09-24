@@ -19,6 +19,7 @@ let homeTab = TabModel(label: "主页", icon: "house.fill", view: .home)
 let agentsTab = TabModel(label: "Agent", icon: "terminal.fill", view: .agents)
 
 let shelfTab = TabModel(label: "文件", icon: "tray.fill", view: .shelf)
+let widgetsTab = TabModel(label: "组件", icon: "square.grid.2x2.fill", view: .widgets)
 
 struct TabSelectionView: View {
     @ObservedObject var coordinator = BoringViewCoordinator.shared
@@ -31,6 +32,7 @@ struct TabSelectionView: View {
         // Agent 任务入口优先，文件存储器作为第二入口，保持用户处理任务时的路径最短。
         if agentIslandEnabled { items.append(agentsTab) }
         if boringShelf { items.append(shelfTab) }
+        items.append(widgetsTab)
         return items
     }
 
