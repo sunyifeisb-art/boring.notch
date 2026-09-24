@@ -53,7 +53,13 @@ class BoringNotchSkyLightWindow: NSPanel {
     
     private func configureWindow() {
         isFloatingPanel = true
-        becomesKeyOnlyIfNeeded = true
+        // SwiftUI's hosted TextField does not advertise
+        // `needsPanelToBecomeKey` through NSHostingView. Requiring that opt-in
+        // leaves the field visually focused while keyboard events continue to
+        // go to the previously active app. A non-activating panel can still
+        // become key without activating Boring Notch, so let any click make it
+        // key and restore reliable typing in the Agent composer.
+        becomesKeyOnlyIfNeeded = false
         isOpaque = false
         titleVisibility = .hidden
         titlebarAppearsTransparent = true

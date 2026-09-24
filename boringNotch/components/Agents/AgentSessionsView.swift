@@ -50,7 +50,7 @@ struct AgentSessionsView: View {
         ) { result in
             guard case .success(let urls) = result, let directory = urls.first else { return }
             manager.newConversation(cwd: directory.path)
-            composerFocused = true
+            focusComposer()
         }
         .onChange(of: manager.sessions.map(\.id)) { _, identifiers in
             if let detailSessionID, !identifiers.contains(detailSessionID) {
@@ -104,7 +104,7 @@ struct AgentSessionsView: View {
 
                     NewClaudeTaskButton {
                         manager.newConversation()
-                        composerFocused = true
+                        focusComposer()
                     }
                 }
                 .padding(.horizontal, 2)
@@ -382,6 +382,11 @@ struct AgentSessionsView: View {
                 .textFieldStyle(.plain)
                 .font(.system(size: showsTarget ? 11 : 12.5))
                 .focused($composerFocused)
+                .simultaneousGesture(
+                    TapGesture().onEnded {
+                        focusComposer()
+                    }
+                )
                 .onSubmit {
                     sendDraft(to: target)
                 }
@@ -419,7 +424,7 @@ struct AgentSessionsView: View {
 
         if message == "/history", let target {
             openSession(target)
-            composerFocused = true
+            focusComposer()
             return
         }
 
@@ -430,7 +435,7 @@ struct AgentSessionsView: View {
         } else {
             manager.newConversation(prompt: message)
         }
-        composerFocused = true
+        focusComposer()
     }
 
     private func submitCommand(_ command: String, to target: AgentSession?) {
@@ -439,15 +444,27 @@ struct AgentSessionsView: View {
         } else if command == "/new" {
             manager.newConversation()
         }
-        composerFocused = true
+        focusComposer()
     }
 
     private func openSession(_ session: AgentSession) {
         detailSessionID = session.id
         if session.source.lowercased() == "claude" {
             manager.select(session)
-            composerFocused = true
+            focusComposer()
         }
+    }
+
+    private func focusComposer() {
+        // `nonactivatingPanel` intentionally keeps the user's current app
+        // active. Explicitly making the visible notch panel key gives its
+        // TextField first-responder status without switching applications.
+        if let panel = NSApp.windows.first(where: {
+            $0 is BoringNotchSkyLightWindow && $0.isVisible
+        }) {
+            panel.makeKey()
+        }
+        composerFocused = true
     }
 
     private func updateNotchSize(hasDetail: Bool) {

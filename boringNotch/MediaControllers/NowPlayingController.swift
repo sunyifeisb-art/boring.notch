@@ -199,6 +199,9 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         
         process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
         process.arguments = [scriptURL.path, frameworkPath, "stream"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["BORING_NOTCH_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
+        process.environment = environment
         
         let pipeHandler = JSONLinesPipeHandler()
         process.standardOutput = await pipeHandler.getPipe()

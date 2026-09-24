@@ -106,8 +106,6 @@ fail "Provided path is not a framework: $framework_path"
 my $framework = File::Spec->catfile($framework_path, $framework_basename);
 fail "Framework not found at $framework" unless -e $framework;
 
-my $handle = DynaLoader::dl_load_file($framework, 0)
-  or fail "Failed to load framework: $framework";
 my $function_name = shift @ARGV or fail "Missing function name";
 fail "Invalid function name: '$function_name'"
   unless $function_name eq "stream"
@@ -118,6 +116,30 @@ fail "Invalid function name: '$function_name'"
   || $function_name eq "repeat"
   || $function_name eq "speed"
   || $function_name eq "test";
+
+# The stream normally lives for the lifetime of Boring Notch. macOS reparents
+# it to launchd when the app is force-replaced, so relying only on Process
+# cleanup leaves one listener behind after every development install. Keep a
+# tiny watchdog that terminates this adapter as soon as its owning app exits.
+my $owner_pid = $ENV{BORING_NOTCH_PARENT_PID} // '';
+if ($function_name eq "stream" && $owner_pid =~ /^\d+$/) {
+  my $adapter_pid = $$;
+  my $watchdog_pid = fork();
+  if (defined $watchdog_pid && $watchdog_pid == 0) {
+    close STDIN;
+    close STDOUT;
+    close STDERR;
+    while (kill 0, $adapter_pid) {
+      last unless kill 0, int($owner_pid);
+      sleep 1;
+    }
+    kill 'TERM', $adapter_pid if kill 0, $adapter_pid;
+    exit 0;
+  }
+}
+
+my $handle = DynaLoader::dl_load_file($framework, 0)
+  or fail "Failed to load framework: $framework";
 
 sub parse_options {
   my ($start_index) = @_;
