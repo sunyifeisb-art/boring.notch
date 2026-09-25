@@ -294,6 +294,7 @@ final class AgentBridgeService {
     private var codexDesktopStatusScanOffset = 0
     private var codexDesktopInterruptedTurnIDs = Set<String>()
     private var lastBackgroundTranscriptRefresh = Date.distantPast
+    private var lastStaleCodexReconciliation = Date.distantPast
     private var dismissedSessionIDs = Set<String>()
     private var socketServer: AgentUnixSocketServer?
     private let commandQueue = DispatchQueue(label: "theboringteam.boringnotch.agent-bridge.commands", attributes: .concurrent)
@@ -1004,6 +1005,23 @@ final class AgentBridgeService {
             refreshTranscriptStreamsLocked(sessionID: detailSessionID)
         }
         let now = Date()
+        if now.timeIntervalSince(lastStaleCodexReconciliation) >= 60 {
+            lastStaleCodexReconciliation = now
+            for (identifier, var session) in sessions
+            where session.source.lowercased() == "codex"
+                && !session.isManaged
+                && !codexHookSessionIDs.contains(identifier)
+                && [.active, .inProgress, .pending, .waitingForApproval, .waitingForAnswer].contains(session.status) {
+                let lastWrite = transcriptStates[identifier]?.path.flatMap {
+                    (try? FileManager.default.attributesOfItem(atPath: $0))?[.modificationDate] as? Date
+                }
+                guard now.timeIntervalSince(lastWrite ?? session.lastActivity) > 24 * 60 * 60 else { continue }
+                session.status = .interrupted
+                session.lastActivity = lastWrite ?? session.lastActivity
+                sessions[identifier] = session
+                transcriptStates.removeValue(forKey: identifier)
+            }
+        }
         if now.timeIntervalSince(lastBackgroundTranscriptRefresh) >= 1 {
             refreshTranscriptStreamsLocked(excludingSessionID: detailSessionID)
             lastBackgroundTranscriptRefresh = now
