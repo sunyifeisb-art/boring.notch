@@ -82,6 +82,7 @@ struct AgentSessionsView: View {
             }
         }
         .onChange(of: detailSessionID) { _, identifier in
+            manager.setVisibleConversationSessionID(identifier)
             updateNotchSize(hasDetail: identifier != nil)
         }
         .onChange(of: manager.requestedOpenSessionID) { _, identifier in
@@ -99,10 +100,12 @@ struct AgentSessionsView: View {
         }
         .onAppear {
             consumeOpenRequest(manager.requestedOpenSessionID)
+            manager.setVisibleConversationSessionID(detailSessionID)
             manager.refreshCodexUsageIfNeeded(activeSessionIDs: activeCodexSessionIDs)
             updateNotchSize(hasDetail: detailSessionID != nil)
         }
         .onDisappear {
+            manager.setVisibleConversationSessionID(nil)
             NotificationCenter.default.post(
                 name: .agentComposerFocusChanged,
                 object: nil,

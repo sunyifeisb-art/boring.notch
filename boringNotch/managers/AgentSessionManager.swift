@@ -19,6 +19,7 @@ final class AgentSessionManager: ObservableObject {
     @Published private(set) var isInstallingHooks = false
     @Published private(set) var closingSessionIDs = Set<String>()
     @Published var selectedSessionID: String?
+    @Published private(set) var visibleConversationSessionID: String?
     @Published var requestedOpenSessionID: String?
     @Published var terminalOpenError: String?
     @Published var workspaceAccessError: String?
@@ -71,17 +72,15 @@ final class AgentSessionManager: ObservableObject {
             bridgeError = await XPCHelperClient.shared.startAgentBridge()
             while !Task.isCancelled {
                 await refreshSessions()
-                let activeSessions = agentSessions.filter { $0.status == .active || $0.status == .inProgress }
-                let interval: Int
-                if activeSessions.contains(where: \.isManaged) {
-                    // 30 Hz keeps text visually fluid while avoiding a full XPC
-                    // snapshot decode on every display refresh for long histories.
-                    interval = 33
-                } else if !activeSessions.isEmpty {
-                    interval = 50
-                } else {
-                    interval = 1_000
-                }
+                // Only stream full session snapshots at display cadence while a
+                // transcript is actually visible. Task cards use summaries, so
+                // polling them at 30 Hz needlessly serialized long histories.
+                let isStreamingVisibleConversation = BoringViewCoordinator.shared.currentView == .agents
+                    && visibleConversationSessionID.map { sessionID in
+                        guard let session = sessions.first(where: { $0.id == sessionID }) else { return false }
+                        return session.status == .active || session.status == .inProgress
+                    } == true
+                let interval = isStreamingVisibleConversation ? 33 : 1_000
                 try? await Task.sleep(for: .milliseconds(interval))
             }
         }
@@ -103,6 +102,7 @@ final class AgentSessionManager: ObservableObject {
         sessions.removeAll(keepingCapacity: false)
         attentionSessionIDs.removeAll(keepingCapacity: false)
         selectedSessionID = nil
+        visibleConversationSessionID = nil
         requestedOpenSessionID = nil
         codexUsage = nil
         XPCHelperClient.shared.stopAgentBridge()
@@ -114,7 +114,8 @@ final class AgentSessionManager: ObservableObject {
         defer { refreshInProgress = false }
 
         let revision = await XPCHelperClient.shared.agentSessionsRevision()
-        let detailSessionID = BoringViewCoordinator.shared.currentView == .agents ? selectedSessionID : nil
+        let detailSessionID = BoringViewCoordinator.shared.currentView == .agents
+            ? visibleConversationSessionID : nil
         if !force, let revision, revision == lastBridgeRevision,
            detailSessionID == lastBridgeDetailedSessionID
         {
@@ -411,6 +412,10 @@ final class AgentSessionManager: ObservableObject {
     func select(_ session: AgentSession) {
         guard ["claude", "codex"].contains(session.source.lowercased()) else { return }
         selectedSessionID = session.id
+    }
+
+    func setVisibleConversationSessionID(_ sessionID: String?) {
+        visibleConversationSessionID = sessionID
     }
 
     func requestOpen(_ session: AgentSession) {
