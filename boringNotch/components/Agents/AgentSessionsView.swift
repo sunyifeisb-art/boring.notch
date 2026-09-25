@@ -1073,16 +1073,17 @@ private struct AgentPagedMessageContent: View {
     private let text: String
     private let isError: Bool
     private let messageID: UUID
-    private let pageRanges: [Range<String.Index>]
+    private let startsAtEnd: Bool
+    @State private var pageRanges: [Range<String.Index>] = []
     @State private var pageIndex: Int
+    @State private var isPreparingPages = true
 
     init(text: String, isError: Bool, messageID: UUID, startsAtEnd: Bool) {
         self.text = text
         self.isError = isError
         self.messageID = messageID
-        let ranges = Self.makePageRanges(in: text)
-        self.pageRanges = ranges
-        _pageIndex = State(initialValue: startsAtEnd ? max(0, ranges.count - 1) : 0)
+        self.startsAtEnd = startsAtEnd
+        _pageIndex = State(initialValue: 0)
     }
 
     private var pageCount: Int { pageRanges.count }
@@ -1094,37 +1095,56 @@ private struct AgentPagedMessageContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            AgentMarkdownContent(text: currentPageText, isError: isError, messageID: messageID)
-
-            HStack(spacing: 8) {
-                Text("长消息分段显示，避免滚动时一次排版整篇内容")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-
-                Spacer(minLength: 4)
-
-                Button("上一段") {
-                    pageIndex = max(0, pageIndex - 1)
+            if isPreparingPages {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.mini)
+                    Text("正在准备长消息…")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
                 }
-                .disabled(pageIndex == 0)
+            } else {
+                AgentMarkdownContent(text: currentPageText, isError: isError, messageID: messageID)
 
-                Text("\(pageIndex + 1)/\(pageCount)")
-                    .font(.system(size: 9, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Text("长消息分段显示，避免滚动时一次排版整篇内容")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
 
-                Button("下一段") {
-                    pageIndex = min(pageCount - 1, pageIndex + 1)
+                    Spacer(minLength: 4)
+
+                    Button("上一段") {
+                        pageIndex = max(0, pageIndex - 1)
+                    }
+                    .disabled(pageIndex == 0)
+
+                    Text("\(pageIndex + 1)/\(pageCount)")
+                        .font(.system(size: 9, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.secondary)
+
+                    Button("下一段") {
+                        pageIndex = min(pageCount - 1, pageIndex + 1)
+                    }
+                    .disabled(pageIndex >= pageCount - 1)
                 }
-                .disabled(pageIndex >= pageCount - 1)
+                .buttonStyle(.borderless)
+                .font(.system(size: 9, weight: .medium))
             }
-            .buttonStyle(.borderless)
-            .font(.system(size: 9, weight: .medium))
         }
         .padding(.top, 2)
+        .task(id: messageID) {
+            let sourceText = text
+            let ranges = await Task.detached(priority: .utility) {
+                Self.makePageRanges(in: sourceText)
+            }.value
+            guard !Task.isCancelled else { return }
+            pageRanges = ranges
+            pageIndex = startsAtEnd ? max(0, ranges.count - 1) : 0
+            isPreparingPages = false
+        }
     }
 
-    private static func makePageRanges(in text: String) -> [Range<String.Index>] {
+    nonisolated private static func makePageRanges(in text: String) -> [Range<String.Index>] {
         guard !text.isEmpty else { return [text.startIndex..<text.endIndex] }
         var ranges: [Range<String.Index>] = []
         var start = text.startIndex
