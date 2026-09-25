@@ -1287,11 +1287,9 @@ private struct AgentMarkdownContent: View, Equatable {
                 // Large transcripts use one text view instead of thousands of
                 // Markdown subviews. This keeps the lazy timeline's row geometry
                 // stable and bounds layout work when entering an older task.
-                Text(text)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(isError ? Color.red : Color.primary)
-                    .lineSpacing(1.5)
-                    .fixedSize(horizontal: false, vertical: true)
+                // Keep inline/display formulas readable in this fallback while
+                // leaving fenced code untouched by the formula recognizer.
+                AgentLongMessageContent(text: text, isError: isError)
             }
         }
         .textSelection(.enabled)
@@ -1439,6 +1437,48 @@ private struct AgentMarkdownContent: View, Equatable {
             RoundedRectangle(cornerRadius: 7)
                 .stroke(Color.white.opacity(0.06), lineWidth: 1)
         }
+    }
+}
+
+private struct AgentLongMessageContent: View {
+    private struct Segment: Identifiable {
+        let id: Int
+        let text: String
+        let isCode: Bool
+    }
+
+    let text: String
+    let isError: Bool
+
+    private var segments: [Segment] {
+        text.components(separatedBy: "```").enumerated().map { index, value in
+            if index.isMultiple(of: 2) {
+                return Segment(id: index, text: value, isCode: false)
+            }
+            let code = value.firstIndex(of: "\n").map { String(value[value.index(after: $0)...]) } ?? value
+            return Segment(id: index, text: code, isCode: true)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(segments) { segment in
+                if segment.isCode {
+                    Text(segment.text)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .foregroundStyle(isError ? Color.red : Color.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    AgentInlineMarkdown(
+                        source: segment.text,
+                        fontSize: 12.5,
+                        color: isError ? .red : .primary
+                    )
+                    .lineSpacing(1.5)
+                }
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
