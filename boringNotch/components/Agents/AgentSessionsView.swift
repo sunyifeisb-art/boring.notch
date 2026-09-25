@@ -882,10 +882,14 @@ private struct AgentConversationTimeline: View {
     private func outlineTitle(for message: AgentMessage, index: Int) -> String {
         let role = message.role == "user" ? "我" : (message.role == "assistant" ? assistantName : "提示")
         let firstLine = message.text
-            .components(separatedBy: .newlines)
-            .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "#*- `>")) ?? ""
+            .prefix(256)
+            .split(whereSeparator: \.isNewline)
+            .first(where: { !String($0).trimmingCharacters(in: .whitespaces).isEmpty })
+            .map {
+                String($0)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "#*- `>"))
+            } ?? ""
         let title = firstLine.isEmpty ? "消息 \(index + 1)" : String(firstLine.prefix(32))
         return "\(role)：\(title)"
     }

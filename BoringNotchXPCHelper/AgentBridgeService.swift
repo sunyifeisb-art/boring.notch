@@ -149,6 +149,16 @@ private struct CodexTranscriptLine: Decodable {
 
 private struct CodexTranscriptEvent: Decodable {
     let turnID: String?
+    let payload: CodexTranscriptEventPayload?
+
+    enum CodingKeys: String, CodingKey {
+        case turnID = "turn_id"
+        case payload
+    }
+}
+
+private struct CodexTranscriptEventPayload: Decodable {
+    let turnID: String?
 
     enum CodingKeys: String, CodingKey {
         case turnID = "turn_id"
@@ -802,13 +812,15 @@ final class AgentBridgeService {
             var summary = message
             if index < recentMessages.count - 2 {
                 summary.text = ""
+            } else if message.role == "assistant" {
+                summary.text = trailingPreview(message.text, maximumCharacters: 600)
             } else {
                 summary.text = String(message.text.prefix(600))
             }
             return summary
         }
         visibleSession.lastAssistantMessage = session.lastAssistantMessage.map {
-            String($0.prefix(1_000))
+            trailingPreview($0, maximumCharacters: 1_000)
         }
         visibleSession.lastUserText = session.lastUserText.map {
             String($0.prefix(1_000))
@@ -821,6 +833,12 @@ final class AgentBridgeService {
             visibleSession.toolInput = nil
         }
         return visibleSession
+    }
+
+    private func trailingPreview(_ text: String, maximumCharacters: Int) -> String {
+        let bytes = text.utf8.suffix(maximumCharacters * 4)
+        let bounded = String(decoding: bytes, as: UTF8.self)
+        return String(bounded.suffix(maximumCharacters))
     }
 
     private func boundedToolInput(
@@ -2409,7 +2427,7 @@ final class AgentBridgeService {
             || line.range(of: Data("\"type\": \"event_msg\"".utf8)) != nil
         {
             if let event = try? transcriptDecoder.decode(CodexTranscriptEvent.self, from: line),
-               let turnID = event.turnID {
+               let turnID = event.payload?.turnID ?? event.turnID {
                 session.turnID = turnID
             }
             return

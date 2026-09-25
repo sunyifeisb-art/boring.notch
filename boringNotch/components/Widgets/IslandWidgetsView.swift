@@ -94,8 +94,9 @@ struct IslandWidgetsView: View {
                         }
                     }
                     .padding(.horizontal, 2)
+                    .padding(.vertical, 2)
                 }
-                .frame(height: 145)
+                .frame(height: 149)
             }
 
             Text("组件直接显示任务状态并提供操作。应用自带的 WidgetKit 画面不能被其他 App 内嵌；清单用于识别本机扩展并显示兼容情况。")
@@ -269,7 +270,7 @@ private struct IslandWidgetCard: View {
         .padding(11)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 13))
-        .overlay(RoundedRectangle(cornerRadius: 13).stroke(Color.white.opacity(0.08), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
     }
 
     @ViewBuilder
