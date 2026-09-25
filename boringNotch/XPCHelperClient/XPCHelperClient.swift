@@ -11,7 +11,7 @@ final class XPCHelperClient: NSObject {
     private var remoteService: RemoteXPCService<BoringNotchXPCHelperProtocol>?
     private var connection: NSXPCConnection?
     private var lastKnownAuthorization: Bool?
-    private var monitoringTask: Task<Void, Never>?
+    private var authorizationActivationObserver: NSObjectProtocol?
     
     deinit {
         connection?.invalidate()
@@ -71,29 +71,25 @@ final class XPCHelperClient: NSObject {
     }
 
     // MARK: - Monitoring
-    nonisolated func startMonitoringAccessibilityAuthorization(every interval: TimeInterval = 3.0) {
-        // Ensure only one monitor exists
+    nonisolated func startMonitoringAccessibilityAuthorization() {
         stopMonitoringAccessibilityAuthorization()
-        monitoringTask = Task.detached { [weak self] in
-            guard let self = self else { return }
-            while !Task.isCancelled {
-                // Call the helper method periodically which will notify on change
-                _ = await self.isAccessibilityAuthorized()
-                do {
-                    try await Task.sleep(for: .seconds(interval))
-                } catch { break }
-            }
+        authorizationActivationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { _ = await self?.isAccessibilityAuthorized() }
         }
+        // Probe once when monitoring begins, then only when the app is active
+        // again after the user may have changed the setting.
+        Task { _ = await isAccessibilityAuthorized() }
     }
 
     nonisolated func stopMonitoringAccessibilityAuthorization() {
-        monitoringTask?.cancel()
-        monitoringTask = nil
-    }
-
-    // Expose whether the client is actively monitoring (useful for tests/debug)
-    var isMonitoring: Bool {
-        return monitoringTask != nil
+        if let authorizationActivationObserver {
+            NotificationCenter.default.removeObserver(authorizationActivationObserver)
+            self.authorizationActivationObserver = nil
+        }
     }
     
     // MARK: - Accessibility

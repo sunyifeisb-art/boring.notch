@@ -329,7 +329,7 @@ final class YouTubeMusicController: MediaControllerProtocol {
         }
     }
     
-    private func stopPeriodicUpdates() {
+    func stopPeriodicUpdates() {
         updateTimer?.invalidate()
         updateTimer = nil
     }

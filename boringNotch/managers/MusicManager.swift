@@ -103,6 +103,7 @@ class MusicManager: ObservableObject {
         flipWorkItem?.cancel()
         transitionWorkItem?.cancel()
 
+        (activeController as? YouTubeMusicController)?.stopPeriodicUpdates()
         // Release active controller
         activeController = nil
     }
@@ -111,6 +112,7 @@ class MusicManager: ObservableObject {
     private func createController(for type: MediaControllerType) -> (any MediaControllerProtocol)? {
         // Cleanup previous controller
         if activeController != nil {
+            (activeController as? YouTubeMusicController)?.stopPeriodicUpdates()
             controllerCancellables.removeAll()
             activeController = nil
         }
