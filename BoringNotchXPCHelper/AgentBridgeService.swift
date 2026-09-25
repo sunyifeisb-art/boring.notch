@@ -302,15 +302,37 @@ final class AgentBridgeService {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".boring-notch", isDirectory: true)
     }
 
+    private static var socketDirectoryURL: URL {
+        URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent("bn-\(getuid())", isDirectory: true)
+    }
+
     private static var socketURL: URL {
-        baseDirectory.appendingPathComponent("run/agent-bridge.sock")
+        socketDirectoryURL.appendingPathComponent("agent.sock")
+    }
+
+    private static func prepareSocketDirectory() throws {
+        let directoryPath = socketDirectoryURL.path
+        if Darwin.mkdir(directoryPath, mode_t(0o700)) != 0, errno != EEXIST {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSLocalizedDescriptionKey: "Unable to create private Agent socket directory"])
+        }
+
+        var directoryInfo = stat()
+        guard Darwin.lstat(directoryPath, &directoryInfo) == 0,
+              (directoryInfo.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR),
+              directoryInfo.st_uid == uid_t(getuid())
+        else {
+            throw NSError(domain: "AgentBridge", code: 2, userInfo: [NSLocalizedDescriptionKey: "Agent socket directory is not a private directory owned by this user"])
+        }
+        guard Darwin.chmod(directoryPath, mode_t(0o700)) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSLocalizedDescriptionKey: "Unable to secure Agent socket directory"])
+        }
     }
 
     func start() throws {
         try stateQueue.sync {
             guard socketServer == nil else { return }
-            let runDirectory = Self.socketURL.deletingLastPathComponent()
-            try FileManager.default.createDirectory(at: runDirectory, withIntermediateDirectories: true)
+            try Self.prepareSocketDirectory()
             let server = try AgentUnixSocketServer(path: Self.socketURL.path) { [weak self] data, descriptor in
                 self?.handle(data: data, descriptor: descriptor)
             }
@@ -3119,9 +3141,8 @@ final class AgentBridgeService {
     private static let openCodePlugin = #"""
 // boring-notch — OpenCode session and approval bridge
 import { connect } from "net";
-import { homedir } from "os";
 
-const socketPath = homedir() + "/.boring-notch/run/agent-bridge.sock";
+const socketPath = `/private/tmp/bn-${process.getuid()}/agent.sock`;
 
 function exchange(payload, waitForResponse = false) {
   return new Promise((resolve) => {
@@ -3204,8 +3225,7 @@ export default async ({ client, serverUrl }) => {
     private static let ampPlugin = #"""
 // boring-notch — Amp lifecycle bridge
 import { connect } from "net";
-import os from "os";
-const socketPath = os.homedir() + "/.boring-notch/run/agent-bridge.sock";
+const socketPath = `/private/tmp/bn-${process.getuid()}/agent.sock`;
 function send(name, detail = {}) {
   try {
     const socket = connect({ path: socketPath }, () => {
@@ -3227,8 +3247,7 @@ export default (amp) => {
     private static let hermesPlugin = #"""
 // boring-notch — Hermes lifecycle bridge
 import { connect } from "net";
-import os from "os";
-const socketPath = os.homedir() + "/.boring-notch/run/agent-bridge.sock";
+const socketPath = `/private/tmp/bn-${process.getuid()}/agent.sock`;
 function send(name, detail = {}) {
   try {
     const socket = connect({ path: socketPath }, () => {
@@ -3251,7 +3270,7 @@ export default (hermes) => {
 #!/usr/bin/env python3
 import json, os, socket, subprocess, sys
 
-SOCKET_PATH = os.path.expanduser("~/.boring-notch/run/agent-bridge.sock")
+SOCKET_PATH = f"/private/tmp/bn-{os.getuid()}/agent.sock"
 
 def get_tty():
     try:
