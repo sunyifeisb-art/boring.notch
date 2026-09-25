@@ -924,7 +924,10 @@ private struct AgentMessageRow: View, Equatable {
             HStack(alignment: .bottom, spacing: 0) {
                 if isUser { Spacer(minLength: 24) }
 
-                AgentBubbleLayout(maximumWidth: isUser ? 520 : 900) {
+                AgentBubbleLayout(
+                    maximumWidth: isUser ? 520 : 900,
+                    prefersIntrinsicWidth: !isStreaming && message.text.utf8.prefix(145).count <= 144
+                ) {
                     VStack(alignment: isUser ? .trailing : .leading, spacing: 2) {
                     HStack(spacing: 4) {
                         Text(roleLabel)
@@ -997,6 +1000,7 @@ private struct AgentMessageRow: View, Equatable {
 
 private struct AgentBubbleLayout: Layout {
     let maximumWidth: CGFloat
+    let prefersIntrinsicWidth: Bool
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         guard let content = subviews.first else { return .zero }
@@ -1005,7 +1009,14 @@ private struct AgentBubbleLayout: Layout {
         // shape its entire growing text as one unbounded line on every update.
         // Constrain the first measurement so long replies wrap immediately and
         // short messages can still report their natural width.
-        return content.sizeThatFits(ProposedViewSize(width: availableWidth, height: proposal.height))
+        let constrainedSize = content.sizeThatFits(ProposedViewSize(width: availableWidth, height: proposal.height))
+        guard prefersIntrinsicWidth else { return constrainedSize }
+
+        // Short, completed messages should hug their text. Keep the intrinsic
+        // measurement off the live stream and off long messages so an expanding
+        // response can never trigger an unbounded layout pass.
+        let naturalSize = content.sizeThatFits(.unspecified)
+        return naturalSize.width <= availableWidth ? naturalSize : constrainedSize
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
