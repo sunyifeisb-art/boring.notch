@@ -99,7 +99,6 @@ struct IslandWidgetsView: View {
                         .padding(.vertical, 2)
                     }
                     .frame(height: 149)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 .frame(height: 149)
             }

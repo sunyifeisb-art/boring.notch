@@ -17,7 +17,7 @@ struct AgentSessionsView: View {
     @State private var showsDirectoryPicker = false
     @State private var isDroppingFileContext = false
     @State private var composerWindow: NSWindow?
-    @AppStorage("agentIslandShowCompleted") private var showCompleted = true
+    @AppStorage("agentIslandShowRecentCompleted") private var showCompleted = false
     @FocusState private var composerFocused: Bool
 
     private var displayedSessions: [AgentSession] {
@@ -26,16 +26,25 @@ struct AgentSessionsView: View {
         let active = sessions.filter { $0.status.isRunningOrWaiting }
         let recentIdle = Array(
             sessions
-                .filter { !$0.status.isTerminal && !$0.status.isRunningOrWaiting && $0.lastActivity >= cutoff }
+                .filter {
+                    !$0.status.isTerminal
+                        && !$0.status.isRunningOrWaiting
+                        && $0.startedAt >= cutoff
+                        && $0.lastActivity >= cutoff
+                }
                 .sorted { $0.lastActivity > $1.lastActivity }
                 .prefix(4)
         )
         let recentCompleted = showCompleted
             ? Array(
                 sessions
-                    .filter { $0.status.isTerminal && $0.lastActivity >= cutoff }
+                    .filter {
+                        $0.status.isTerminal
+                            && $0.startedAt >= cutoff
+                            && $0.lastActivity >= cutoff
+                    }
                     .sorted { $0.lastActivity > $1.lastActivity }
-                    .prefix(6)
+                    .prefix(2)
             )
             : []
 

@@ -329,10 +329,24 @@ final class AgentBridgeService {
         }
     }
 
+    private static func refreshInstalledHookScriptIfPresent() {
+        let hookURL = baseDirectory.appendingPathComponent("hooks/agent-hook.py")
+        guard FileManager.default.fileExists(atPath: hookURL.path) else { return }
+        let updatedScript = Data(pythonHook.utf8)
+        guard (try? Data(contentsOf: hookURL)) != updatedScript else { return }
+        do {
+            try updatedScript.write(to: hookURL, options: .atomic)
+            _ = chmod(hookURL.path, 0o755)
+        } catch {
+            NSLog("Unable to refresh installed Agent hook: %@", error.localizedDescription)
+        }
+    }
+
     func start() throws {
         try stateQueue.sync {
             guard socketServer == nil else { return }
             try Self.prepareSocketDirectory()
+            Self.refreshInstalledHookScriptIfPresent()
             let server = try AgentUnixSocketServer(path: Self.socketURL.path) { [weak self] data, descriptor in
                 self?.handle(data: data, descriptor: descriptor)
             }
@@ -757,7 +771,7 @@ final class AgentBridgeService {
                     isManaged: false,
                     messages: [],
                     startedAt: createdAt ?? activity,
-                    lastActivity: Date()
+                    lastActivity: activity
                 )
                 sessions[identifier] = session
                 registerTranscript(path: path, sessionID: identifier, tailWindow: 64 * 1024)

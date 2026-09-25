@@ -143,7 +143,7 @@ struct AgentSettings: View {
     @AppStorage("agentIslandAutoOpen") private var autoOpen = true
     @AppStorage("agentIslandShowNotifications") private var showNotifications = true
     @AppStorage("agentIslandAutoSelectNewest") private var autoSelectNewest = true
-    @AppStorage("agentIslandShowCompleted") private var showCompleted = true
+    @AppStorage("agentIslandShowRecentCompleted") private var showCompleted = false
 
     var body: some View {
         Form {
