@@ -12,6 +12,7 @@ struct AgentSessionsView: View {
     @EnvironmentObject private var vm: BoringViewModel
     @ObservedObject private var manager = AgentSessionManager.shared
     @State private var draft = ""
+    @State private var pendingNewConversationPrompt: String?
     @State private var detailSessionID: String?
     @State private var showsDirectoryPicker = false
     @State private var isDroppingFileContext = false
@@ -62,9 +63,17 @@ struct AgentSessionsView: View {
             allowedContentTypes: [.folder],
             allowsMultipleSelection: false
         ) { result in
-            guard case .success(let urls) = result, let directory = urls.first else { return }
-            guard manager.setDefaultWorkingDirectory(directory) else { return }
-            manager.newConversation(cwd: directory.path)
+            guard case .success(let urls) = result, let directory = urls.first else {
+                pendingNewConversationPrompt = nil
+                return
+            }
+            guard manager.setDefaultWorkingDirectory(directory) else {
+                pendingNewConversationPrompt = nil
+                return
+            }
+            let prompt = pendingNewConversationPrompt
+            pendingNewConversationPrompt = nil
+            manager.newConversation(cwd: directory.path, prompt: prompt)
             focusComposer()
         }
         .onChange(of: manager.sessions.map(\.id)) { _, identifiers in
@@ -591,7 +600,12 @@ struct AgentSessionsView: View {
         } else if let target {
             manager.sendMessage(message, to: target.id)
         } else {
-            manager.newConversation(prompt: message)
+            if manager.hasDefaultWorkingDirectory {
+                manager.newConversation(prompt: message)
+            } else {
+                pendingNewConversationPrompt = message
+                showsDirectoryPicker = true
+            }
         }
         focusComposer()
     }
@@ -613,6 +627,7 @@ struct AgentSessionsView: View {
 
     private func startNewConversation() {
         detailSessionID = nil
+        pendingNewConversationPrompt = nil
         if manager.hasDefaultWorkingDirectory {
             manager.newConversation()
         } else {
