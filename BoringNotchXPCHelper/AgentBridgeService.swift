@@ -162,6 +162,7 @@ private struct CodexTranscriptEventPayload: Decodable {
     let turnID: String?
 
     enum CodingKeys: String, CodingKey {
+        case type
         case turnID = "turn_id"
     }
 }
