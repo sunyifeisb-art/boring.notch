@@ -2127,7 +2127,7 @@ private struct AgentComposerTextField: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField(string: text)
+        let field = AgentFocusableTextField(string: text)
         field.isBordered = false
         field.isBezeled = false
         field.drawsBackground = false
@@ -2204,15 +2204,12 @@ private struct AgentComposerTextField: NSViewRepresentable {
 
         func requestFocus() {
             guard let field, let window = field.window, window.isVisible else { return }
-            if let panel = window as? BoringNotchSkyLightWindow {
-                panel.makeKey()
-            } else {
-                window.makeKey()
-            }
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
 
             DispatchQueue.main.async { [weak self, weak field, weak window] in
                 guard let self, let field, let window, window.isVisible else { return }
-                if !window.isKeyWindow { window.makeKey() }
+                if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
                 guard window.isKeyWindow else { return }
                 let editor = field.currentEditor()
                 if window.firstResponder !== field, window.firstResponder !== editor {
@@ -2220,5 +2217,19 @@ private struct AgentComposerTextField: NSViewRepresentable {
                 }
             }
         }
+    }
+}
+
+private final class AgentFocusableTextField: NSTextField {
+    override var needsPanelToBecomeKey: Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        // Hover can exit as a nonactivating panel claims keyboard focus. Mark
+        // the composer as pending before AppKit changes the key window so the
+        // island cannot close between mouseDown and beginEditing.
+        NotificationCenter.default.post(name: .agentComposerFocusRequested, object: nil)
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+        super.mouseDown(with: event)
     }
 }
