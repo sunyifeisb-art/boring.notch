@@ -602,7 +602,10 @@ final class AgentBridgeService {
 
     func sessionsJSON() -> Data {
         stateQueue.sync {
-            prepareSessionsLocked()
+            // The client checks sessionsRevision immediately before asking for
+            // this snapshot. That revision check already refreshes transcript
+            // files; doing it again here doubled file reads and JSONL parsing
+            // on every active streaming update.
             if let cachedSessionsJSON { return cachedSessionsJSON }
 
             let ordered = sessions.values.map(clientVisibleSession).sorted {
