@@ -1062,8 +1062,16 @@ private struct AgentMarkdownContent: View, Equatable {
         // with hundreds of asynchronously-created rows changed lazy-list row
         // heights after scrolling had begun, which could leave stale/overlapped
         // content visible when opening long conversations.
-        let newlineCount = text.utf8.filter { $0 == 0x0A }.prefix(201).count
-        if text.utf8.count <= 20_000, newlineCount <= 200 {
+        let boundedUTF8 = text.utf8.prefix(20_001)
+        let fitsByteLimit = boundedUTF8.count <= 20_000
+        var newlineCount = 0
+        if fitsByteLimit {
+            for byte in boundedUTF8 where byte == 0x0A {
+                newlineCount += 1
+                if newlineCount > 200 { break }
+            }
+        }
+        if fitsByteLimit, newlineCount <= 200 {
             parsedBlocks = Self.parseBlocks(text)
         } else {
             parsedBlocks = nil
