@@ -100,7 +100,7 @@ struct ContentView: View {
         {
             return selected
         }
-        return agentManager.sessions.first(where: { $0.status != .completed }) ?? agentManager.sessions.first
+        return agentManager.sessions.first(where: { !$0.status.isTerminal }) ?? agentManager.sessions.first
     }
 
     var body: some View {

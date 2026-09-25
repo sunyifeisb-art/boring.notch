@@ -24,10 +24,16 @@ final class AirDropTransferMonitor: ObservableObject {
         var subscriber: Any?
         let progress: Progress
         let observation: NSKeyValueObservation
+        let phase: Phase
+    }
+
+    private struct ProgressSubscriber {
+        let token: Any
+        let phase: Phase
     }
 
     private var incomingSubscriber: Any?
-    private var subscriberByID: [UUID: Any] = [:]
+    private var subscriberByID: [UUID: ProgressSubscriber] = [:]
     private var progressByID: [UUID: ObservedProgress] = [:]
     private var directorySource: DispatchSourceFileSystemObject?
     private var directoryDescriptor: Int32 = -1
@@ -44,8 +50,8 @@ final class AirDropTransferMonitor: ObservableObject {
     func start() {
         guard !didStart else { return }
         didStart = true
-        // Use the real user Downloads directory: URL.downloadsDirectory resolves
-        // to the app container's private Downloads folder for sandboxed apps.
+        // Resolve the user's Downloads folder explicitly. The app's sandbox
+        // entitlement grants read-only access to this location.
         let downloadsURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Downloads", isDirectory: true)
 
@@ -94,7 +100,7 @@ final class AirDropTransferMonitor: ObservableObject {
 
     func beginSending(items: [Any]) {
         hideTask?.cancel()
-        clearProgressObservers()
+        clearProgressObservers(for: .sending)
         fileURL = items.compactMap { $0 as? URL }.first(where: \.isFileURL)
         fractionCompleted = nil
         withAnimation(.snappy(duration: 0.28)) { phase = .sending }
@@ -105,7 +111,7 @@ final class AirDropTransferMonitor: ObservableObject {
 
     func finishSending(error: Error? = nil) {
         guard phase == .sending else { return }
-        clearProgressObservers()
+        clearProgressObservers(for: .sending)
         fractionCompleted = error == nil ? 1 : nil
         withAnimation(.snappy(duration: 0.28)) { phase = error == nil ? .sent : .failed }
         scheduleHide(after: error == nil ? 4 : 6)
@@ -161,13 +167,13 @@ final class AirDropTransferMonitor: ObservableObject {
                 $0.progress.userInfo[.fileURLKey] as? URL == url && !$0.progress.isFinished
             }
             if let activeProgress {
+                hideTask?.cancel()
                 fileURL = url
                 fractionCompleted = activeProgress.progress.isIndeterminate
                     ? nil : activeProgress.progress.fractionCompleted
                 withAnimation(.snappy(duration: 0.28)) { phase = .receiving }
                 continue
             }
-            clearProgressObservers()
             fileURL = url
             fractionCompleted = 1
             withAnimation(.snappy(duration: 0.3)) { phase = .received }
@@ -195,7 +201,7 @@ final class AirDropTransferMonitor: ObservableObject {
                 Task { @MainActor [weak self] in self?.removeProgressObserver(id: id) }
             }
         }
-        subscriberByID[id] = subscriber
+        subscriberByID[id] = ProgressSubscriber(token: subscriber, phase: phase)
     }
 
     private func attach(_ progress: Progress, id: UUID, subscriber: Any?, for url: URL, phase: Phase) {
@@ -210,22 +216,35 @@ final class AirDropTransferMonitor: ObservableObject {
                 }
                 self.fileURL = url
                 self.fractionCompleted = fraction
-                if self.phase == nil || (phase == .receiving && self.phase != .received) {
-                    withAnimation(.snappy(duration: 0.28)) { self.phase = phase }
+                if phase == .receiving && !progress.isFinished {
+                    self.hideTask?.cancel()
+                    if self.phase != .receiving {
+                        withAnimation(.snappy(duration: 0.28)) { self.phase = .receiving }
+                    }
+                } else if phase == .sending && self.phase == nil {
+                    withAnimation(.snappy(duration: 0.28)) { self.phase = .sending }
                 }
                 if phase == .receiving && progress.isFinished {
-                    self.fractionCompleted = 1
-                    withAnimation(.snappy(duration: 0.28)) { self.phase = .received }
-                    self.scheduleHide(after: 18)
+                    self.removeProgressObserver(id: id)
+                    let anotherReceiveIsActive = self.progressByID.values.contains {
+                        $0.phase == .receiving && !$0.progress.isFinished
+                    }
+                    if !anotherReceiveIsActive {
+                        self.fractionCompleted = 1
+                        withAnimation(.snappy(duration: 0.28)) { self.phase = .received }
+                        self.scheduleHide(after: 18)
+                    }
+                    return
                 }
                 if progress.isFinished { self.removeProgressObserver(id: id) }
             }
         }
-        let registeredSubscriber = subscriber ?? subscriberByID.removeValue(forKey: id)
+        let registeredSubscriber = subscriber ?? subscriberByID.removeValue(forKey: id)?.token
         progressByID[id] = ObservedProgress(
             subscriber: registeredSubscriber,
             progress: progress,
-            observation: observation
+            observation: observation,
+            phase: phase
         )
     }
 
@@ -250,17 +269,27 @@ final class AirDropTransferMonitor: ObservableObject {
         }
     }
 
-    private func clearProgressObservers() {
-        for value in progressByID.values {
+    private func clearProgressObservers(for phase: Phase? = nil) {
+        let progressIDs = progressByID.compactMap { id, value in
+            phase == nil || value.phase == phase ? id : nil
+        }
+        for id in progressIDs {
+            guard let value = progressByID.removeValue(forKey: id) else { continue }
+            value.observation.invalidate()
             if let subscriber = value.subscriber { Progress.removeSubscriber(subscriber) }
         }
-        progressByID.removeAll()
-        for subscriber in subscriberByID.values { Progress.removeSubscriber(subscriber) }
-        subscriberByID.removeAll()
+        let subscriberIDs = subscriberByID.compactMap { id, subscriber in
+            phase == nil || subscriber.phase == phase ? id : nil
+        }
+        for id in subscriberIDs {
+            guard let subscriber = subscriberByID.removeValue(forKey: id) else { continue }
+            Progress.removeSubscriber(subscriber.token)
+        }
     }
 
     private func removeProgressObserver(id: UUID) {
         guard let value = progressByID.removeValue(forKey: id) else { return }
+        value.observation.invalidate()
         if let subscriber = value.subscriber { Progress.removeSubscriber(subscriber) }
     }
 }

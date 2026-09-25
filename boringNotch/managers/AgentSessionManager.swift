@@ -42,7 +42,7 @@ final class AgentSessionManager: ObservableObject {
     }
 
     var activeSessionCount: Int {
-        agentSessions.filter { $0.status != .completed }.count
+        agentSessions.filter { $0.status.isRunningOrWaiting }.count
     }
 
     var agentSessions: [AgentSession] {
@@ -113,9 +113,9 @@ final class AgentSessionManager: ObservableObject {
         refreshInProgress = true
         defer { refreshInProgress = false }
 
-        let revision = await XPCHelperClient.shared.agentSessionsRevision()
         let detailSessionID = BoringViewCoordinator.shared.currentView == .agents
             ? visibleConversationSessionID : nil
+        let revision = await XPCHelperClient.shared.agentSessionsRevision(detailSessionID: detailSessionID)
         if !force, let revision, revision == lastBridgeRevision,
            detailSessionID == lastBridgeDetailedSessionID
         {
@@ -139,9 +139,9 @@ final class AgentSessionManager: ObservableObject {
         if revision == nil, updatedSessions == sessions { return }
 
         let previousChromeSignature = chromeSignature(for: sessions)
-        let previousActive = Set(agentSessions.filter { $0.status != .completed }.map(\.id))
+        let previousActive = Set(agentSessions.filter { $0.status.isRunningOrWaiting }.map(\.id))
         let updatedAgentSessions = updatedSessions.filter { ["claude", "codex"].contains($0.source.lowercased()) }
-        let updatedActive = Set(updatedAgentSessions.filter { $0.status != .completed }.map(\.id))
+        let updatedActive = Set(updatedAgentSessions.filter { $0.status.isRunningOrWaiting }.map(\.id))
         let newActive = updatedActive.subtracting(previousActive)
         let updatedAttention = Set(updatedAgentSessions.filter { $0.status.needsAttention }.map(\.id))
         let newAttention = updatedAttention.subtracting(attentionSessionIDs)
@@ -156,7 +156,7 @@ final class AgentSessionManager: ObservableObject {
         let autoSelectNewest = UserDefaults.standard.object(forKey: "agentIslandAutoSelectNewest") as? Bool ?? true
         if autoSelectNewest,
            (selectedSessionID == nil || !newActive.isEmpty),
-           let newest = updatedAgentSessions.first(where: { $0.status != .completed })
+           let newest = updatedAgentSessions.first(where: { $0.status.isRunningOrWaiting })
         {
             selectedSessionID = newest.id
         }
@@ -235,7 +235,7 @@ final class AgentSessionManager: ObservableObject {
 
     private var activeCodexSessionIDs: [String] {
         agentSessions
-            .filter { $0.source.lowercased() == "codex" && $0.status != .completed }
+            .filter { $0.source.lowercased() == "codex" && $0.status.isRunningOrWaiting }
             .map(\.id)
             .sorted()
     }
@@ -312,7 +312,9 @@ final class AgentSessionManager: ObservableObject {
     @discardableResult
     func setDefaultWorkingDirectory(_ directory: URL) -> Bool {
         guard directory.isFileURL else { return false }
-        if activeWorkspaceAccessURL?.standardizedFileURL == directory.standardizedFileURL {
+        if activeWorkspaceAccessStarted,
+           activeWorkspaceAccessURL?.standardizedFileURL == directory.standardizedFileURL
+        {
             workspaceAccessError = nil
             return true
         }
@@ -375,12 +377,25 @@ final class AgentSessionManager: ObservableObject {
                     bookmarkDataIsStale: &isStale
                 )
             }
-            let values = try directory.resourceValues(forKeys: [.isDirectoryKey])
-            guard values.isDirectory == true else {
-                throw CocoaError(.fileReadNoPermission)
+            let alreadyAccessing = activeWorkspaceAccessStarted
+                && activeWorkspaceAccessURL?.standardizedFileURL == directory.standardizedFileURL
+            let didStartAccessing = alreadyAccessing ? false : directory.startAccessingSecurityScopedResource()
+            do {
+                // A sandboxed app must open a resolved security scope before
+                // touching the directory. Reading resource values first can
+                // fail, causing a valid saved bookmark to be discarded and
+                // prompting for the same folder on every new conversation.
+                if alreadyAccessing || didStartAccessing {
+                    let values = try directory.resourceValues(forKeys: [.isDirectoryKey])
+                    guard values.isDirectory == true else {
+                        throw CocoaError(.fileReadNoPermission)
+                    }
+                }
+            } catch {
+                if didStartAccessing { directory.stopAccessingSecurityScopedResource() }
+                throw error
             }
-            if activeWorkspaceAccessURL?.standardizedFileURL != directory.standardizedFileURL {
-                let didStartAccessing = directory.startAccessingSecurityScopedResource()
+            if !alreadyAccessing {
                 if activeWorkspaceAccessStarted {
                     activeWorkspaceAccessURL?.stopAccessingSecurityScopedResource()
                 }
@@ -403,8 +418,10 @@ final class AgentSessionManager: ObservableObject {
             }
             return directory
         } catch {
-            UserDefaults.standard.removeObject(forKey: Self.defaultWorkspaceBookmarkKey)
-            workspaceAccessError = "默认工作目录授权已失效，请重新选择一次。"
+            // Keep a bookmark on transient resolution or file-system failures.
+            // The user can explicitly replace it from the directory control;
+            // silently deleting it forces a fresh permission prompt next time.
+            workspaceAccessError = "无法恢复默认工作目录。请检查文件夹是否仍可用，或在设置中重新选择。"
             return nil
         }
     }

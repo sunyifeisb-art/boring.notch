@@ -21,7 +21,7 @@ struct AgentSessionsView: View {
     @FocusState private var composerFocused: Bool
 
     private var displayedSessions: [AgentSession] {
-        showCompleted ? manager.agentSessions : manager.agentSessions.filter { $0.status != .completed }
+        showCompleted ? manager.agentSessions : manager.agentSessions.filter { !$0.status.isTerminal }
     }
 
     private var selectedAgentSession: AgentSession? {

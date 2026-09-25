@@ -84,6 +84,8 @@ private enum BridgeSessionStatus: String, Codable, Equatable {
     case pending
     case inProgress = "in_progress"
     case completed
+    case interrupted
+    case failed
     case waitingForApproval = "waiting_for_approval"
     case waitingForAnswer = "waiting_for_answer"
 
@@ -93,6 +95,8 @@ private enum BridgeSessionStatus: String, Codable, Equatable {
         case .idle: return "就绪"
         case .pending: return "等待中"
         case .completed: return "已完成"
+        case .interrupted: return "已中断"
+        case .failed: return "执行失败"
         case .waitingForApproval: return "等待批准"
         case .waitingForAnswer: return "等待回答"
         }
@@ -221,6 +225,7 @@ private struct TranscriptState {
     var currentClaudeMessageID: String?
     var currentBridgeMessageID: UUID?
     var codexTaskStatus: BridgeSessionStatus? = nil
+    var lastFileWriteAt: Date?
 }
 
 private final class AgentDataCapture: @unchecked Sendable {
@@ -285,6 +290,9 @@ final class AgentBridgeService {
     private var codexDesktopTimer: DispatchSourceTimer?
     private var codexDesktopObservers: [NSObjectProtocol] = []
     private let codexDesktopQueue = DispatchQueue(label: "theboringteam.boringnotch.codex-desktop-sync", qos: .utility)
+    private var codexDesktopRetryAfter = Date.distantPast
+    private var lastFullCodexStatusRefresh = Date.distantPast
+    private var lastBackgroundTranscriptRefresh = Date.distantPast
     private var dismissedSessionIDs = Set<String>()
     private var socketServer: AgentUnixSocketServer?
     private let commandQueue = DispatchQueue(label: "theboringteam.boringnotch.agent-bridge.commands", attributes: .concurrent)
@@ -331,6 +339,7 @@ final class AgentBridgeService {
             dismissedSessionIDs.removeAll()
             codexManagedTurns.removeAll()
             codexDesktopFileSizes.removeAll(keepingCapacity: false)
+            lastBackgroundTranscriptRefresh = .distantPast
         }
     }
 
@@ -353,7 +362,7 @@ final class AgentBridgeService {
                         self.stopCodexDesktopDiscoveryLocked()
                         for (identifier, var session) in self.sessions where session.source.lowercased() == "codex" {
                             if session.status == .active || session.status == .inProgress || session.status == .pending {
-                                session.status = .idle
+                                session.status = .interrupted
                                 session.lastActivity = Date()
                                 self.sessions[identifier] = session
                             }
@@ -370,8 +379,12 @@ final class AgentBridgeService {
         guard codexDesktopTimer == nil,
               !NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").isEmpty
         else { return }
+        codexDesktopQueue.async { [weak self] in
+            self?.codexDesktopRetryAfter = .distantPast
+            self?.lastFullCodexStatusRefresh = .distantPast
+        }
         let timer = DispatchSource.makeTimerSource(queue: codexDesktopQueue)
-        timer.schedule(deadline: .now() + .milliseconds(300), repeating: .seconds(8), leeway: .seconds(2))
+        timer.schedule(deadline: .now() + .milliseconds(300), repeating: .seconds(3), leeway: .milliseconds(500))
         timer.setEventHandler { [weak self] in
             self?.discoverCodexDesktopThreads()
         }
@@ -385,10 +398,15 @@ final class AgentBridgeService {
     }
 
     private func discoverCodexDesktopThreads() {
-        guard !NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").isEmpty,
-              stateQueue.sync(execute: { socketServer != nil }),
-              let data = codexDesktopThreadsJSON()
+        guard Date() >= codexDesktopRetryAfter,
+              !NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").isEmpty,
+              stateQueue.sync(execute: { socketServer != nil })
         else { return }
+        guard let data = codexDesktopThreadsJSON() else {
+            codexDesktopRetryAfter = Date().addingTimeInterval(8)
+            return
+        }
+        codexDesktopRetryAfter = .distantPast
 
         stateQueue.async { [weak self] in
             guard let self, self.socketServer != nil else { return }
@@ -412,7 +430,10 @@ final class AgentBridgeService {
         }
         do {
             try process.run()
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 8, execute: timeout)
+            // Discovery also asks for the latest turn status of a small number
+            // of recent desktop threads. Keep the whole exchange bounded while
+            // giving those lightweight requests time to complete.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 12, execute: timeout)
             var buffer = Data()
             var nextID = 0
 
@@ -446,6 +467,13 @@ final class AgentBridgeService {
                 return nil
             }
 
+            func request(_ method: String, params: [String: Any]) -> [String: Any]? {
+                nextID += 1
+                let requestID = nextID
+                guard send(method, params: params, requestID: requestID) else { return nil }
+                return response(for: requestID)
+            }
+
             nextID += 1
             let initializeID = nextID
             guard send(
@@ -463,23 +491,41 @@ final class AgentBridgeService {
             }
 
             _ = send("initialized", params: [:], requestID: nil)
-            nextID += 1
-            let listID = nextID
-            guard send(
-                "thread/list",
-                params: ["limit": 30, "sortKey": "updated_at", "sortDirection": "desc", "archived": false],
-                requestID: listID
-            ), let listing = response(for: listID),
-               let result = listing["result"] as? [String: Any],
-               let threads = result["data"] as? [[String: Any]]
-            else {
-                timeout.cancel()
-                if process.isRunning { process.terminate() }
-                process.waitUntilExit()
-                return nil
+            // Codex paginates thread/list. A single page silently omitted all
+            // but the newest 30 tasks, which made older selected desktop tasks
+            // look permanently out of sync. Read a bounded recent history; the
+            // bridge itself retains only active tasks plus the newest 30 idle
+            // tasks, so scanning the entire local archive would waste work.
+            var threads: [[String: Any]] = []
+            var cursor: String?
+            var seenCursors = Set<String>()
+            let maximumThreadCount = 300
+            while threads.count < maximumThreadCount {
+                var params: [String: Any] = [
+                    "limit": min(100, maximumThreadCount - threads.count),
+                    "sortKey": "updated_at",
+                    "sortDirection": "desc",
+                    "archived": false
+                ]
+                if let cursor { params["cursor"] = cursor }
+                guard let listing = request("thread/list", params: params),
+                      let result = listing["result"] as? [String: Any],
+                      let page = result["data"] as? [[String: Any]]
+                else {
+                    timeout.cancel()
+                    if process.isRunning { process.terminate() }
+                    process.waitUntilExit()
+                    return nil
+                }
+                threads.append(contentsOf: page.prefix(maximumThreadCount - threads.count))
+                guard let nextCursor = result["nextCursor"] as? String,
+                      !nextCursor.isEmpty,
+                      seenCursors.insert(nextCursor).inserted
+                else { break }
+                cursor = nextCursor
             }
 
-            let desktopThreads: [[String: Any]] = threads.compactMap { thread in
+            var desktopThreads: [[String: Any]] = threads.compactMap { thread in
                 let originator = thread["originator"] as? String
                 let sourceKind = (thread["sourceKind"] as? String ?? thread["source_kind"] as? String)?.lowercased()
                 guard (originator.map(isCodexDesktopOriginator) == true || sourceKind == "desktop"),
@@ -495,6 +541,47 @@ final class AgentBridgeService {
                     "updatedAt": thread["updatedAt"] ?? NSNull(),
                     "recencyAt": thread["recencyAt"] ?? NSNull()
                 ]
+            }
+
+            // thread/list only reports whether a thread is loaded in this
+            // app-server process (usually `notLoaded`), not whether its task is
+            // currently running. The authoritative status is on its newest
+            // turn. Read one turn summary per selected thread; the thread scan
+            // is bounded above, while active tasks remain pinned between full
+            // status refreshes.
+            let knownActiveIDs = stateQueue.sync {
+                Set(sessions.values.compactMap { session -> String? in
+                    guard session.source.lowercased() == "codex",
+                          [.active, .inProgress, .pending, .waitingForApproval, .waitingForAnswer].contains(session.status)
+                    else { return nil }
+                    return session.id
+                })
+            }
+            let refreshAllStatuses = Date().timeIntervalSince(lastFullCodexStatusRefresh) >= 15
+            if refreshAllStatuses { lastFullCodexStatusRefresh = Date() }
+
+            // Refresh the newest tasks on every pass and keep previously active
+            // tasks pinned to live status. Recheck the entire bounded history
+            // every 15 seconds, which covers older waiting tasks without making
+            // hundreds of turn RPCs on every 3-second poll.
+            for index in desktopThreads.indices {
+                let threadID = desktopThreads[index]["id"] as? String
+                guard refreshAllStatuses || index < 100 || threadID.map(knownActiveIDs.contains) == true else {
+                    continue
+                }
+                guard let threadID,
+                      let latestTurnPage = request("thread/turns/list", params: [
+                        "threadId": threadID,
+                        "limit": 1,
+                        "sortDirection": "desc",
+                        "itemsView": "summary"
+                      ]),
+                      let turns = (latestTurnPage["result"] as? [String: Any])?["data"] as? [[String: Any]],
+                      let latestTurn = turns.first
+                else { continue }
+
+                desktopThreads[index]["taskStatus"] = latestTurn["status"] ?? NSNull()
+                desktopThreads[index]["activeTurnID"] = latestTurn["id"] ?? NSNull()
             }
             timeout.cancel()
             process.terminate()
@@ -512,7 +599,8 @@ final class AgentBridgeService {
         guard let records = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
         let sessionsRoot = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex/sessions", isDirectory: true).standardizedFileURL.path + "/"
-        var needsTranscriptSeed = false
+        var transcriptSessionIDsToSeed = Set<String>()
+        var transcriptStatusRefreshIDs = Set<String>()
         var pendingStatuses: [(id: String, status: BridgeSessionStatus, activity: Date)] = []
 
         for record in records {
@@ -532,14 +620,31 @@ final class AgentBridgeService {
             let isRecentlyWritten = modifiedAt.map { Date().timeIntervalSince($0) < 30 } ?? false
             let previousSize = codexDesktopFileSizes[identifier]
             let fileChanged = previousSize.map { $0 != fileSize } ?? false
-            let discoveredStatus: BridgeSessionStatus = (isRecentlyWritten || fileChanged) ? .inProgress : .completed
+            let remoteTurnStatus = record["taskStatus"] as? String
             if fileChanged, var transcriptState = transcriptStates[identifier] {
                 // A new append after a completed task starts a fresh lifecycle.
                 // Keeping the previous task_complete cached would make the
                 // parser skip the new task_started row and leave turnID stale.
                 transcriptState.codexTaskStatus = nil
                 transcriptStates[identifier] = transcriptState
+                transcriptSessionIDsToSeed.insert(identifier)
+                transcriptStatusRefreshIDs.insert(identifier)
             }
+            let transcriptStatus = transcriptStates[identifier]?.codexTaskStatus
+            let transcriptWriteIsFresh = transcriptStates[identifier]?.lastFileWriteAt
+                .map { Date().timeIntervalSince($0) < 30 } ?? false
+            // A separate app-server process can report the last persisted turn
+            // as interrupted while Codex Desktop is actively writing the same
+            // transcript. Prefer fresh transcript activity in that case; once
+            // the appended task_complete/turn_aborted event is parsed below,
+            // that transcript event becomes authoritative again.
+            let transcriptShowsFreshActivity = fileChanged || transcriptWriteIsFresh
+                || (previousSize == nil && isRecentlyWritten)
+            let discoveredStatus: BridgeSessionStatus = transcriptShowsFreshActivity
+                ? (transcriptStatus ?? .inProgress)
+                : remoteTurnStatus.flatMap(Self.bridgeStatus(forCodexTurn:))
+                    ?? transcriptStatus
+                    ?? (fileSize == 0 ? .idle : (isRecentlyWritten ? .inProgress : .completed))
 
             var session: BridgeSession
             if let existing = sessions[identifier] {
@@ -547,21 +652,26 @@ final class AgentBridgeService {
                 if let title = record["title"] as? String, !title.isEmpty { session.title = title }
                 if let cwd = record["cwd"] as? String, !cwd.isEmpty { session.cwd = cwd }
                 session.resumeID = identifier
-                if fileChanged { session.turnID = nil }
+                if let activeTurnID = record["activeTurnID"] as? String {
+                    session.turnID = activeTurnID
+                } else if fileChanged {
+                    session.turnID = nil
+                }
                 if !codexHookSessionIDs.contains(identifier) {
-                    session.status = transcriptStates[identifier]?.codexTaskStatus ?? discoveredStatus
+                    session.status = discoveredStatus
                     session.lastActivity = fileChanged ? Date() : activity
                 }
                 if transcriptStates[identifier]?.path != path {
                     registerTranscript(path: path, sessionID: identifier, tailWindow: 64 * 1024)
-                    needsTranscriptSeed = true
+                    transcriptSessionIDsToSeed.insert(identifier)
+                    transcriptStatusRefreshIDs.insert(identifier)
                 }
                 if session != existing { sessions[identifier] = session }
             } else {
                 session = BridgeSession(
                     id: identifier,
                     source: "codex",
-                    status: .inProgress,
+                    status: discoveredStatus,
                     cwd: record["cwd"] as? String,
                     lastUserText: nil,
                     lastAssistantMessage: nil,
@@ -573,7 +683,7 @@ final class AgentBridgeService {
                     terminalBundleID: "com.openai.codex",
                     ghosttyTerminalID: nil,
                     resumeID: identifier,
-                    turnID: nil,
+                    turnID: record["activeTurnID"] as? String,
                     isManaged: false,
                     messages: [],
                     startedAt: createdAt ?? activity,
@@ -581,7 +691,8 @@ final class AgentBridgeService {
                 )
                 sessions[identifier] = session
                 registerTranscript(path: path, sessionID: identifier, tailWindow: 64 * 1024)
-                needsTranscriptSeed = true
+                transcriptSessionIDsToSeed.insert(identifier)
+                transcriptStatusRefreshIDs.insert(identifier)
             }
 
             if fileSize == 0, transcriptStates[identifier] == nil { continue }
@@ -589,12 +700,34 @@ final class AgentBridgeService {
             codexDesktopFileSizes[identifier] = fileSize
         }
 
-        if needsTranscriptSeed { refreshTranscriptStreamsLocked() }
+        for identifier in transcriptSessionIDsToSeed {
+            refreshTranscriptStreamsLocked(sessionID: identifier)
+        }
         for pending in pendingStatuses where !codexHookSessionIDs.contains(pending.id) {
             guard var session = sessions[pending.id] else { continue }
-            session.status = transcriptStates[pending.id]?.codexTaskStatus ?? pending.status
-            session.lastActivity = pending.activity
+            // Seeding an appended Codex transcript above can discover a newer
+            // task_started/task_complete event than the app-server snapshot
+            // captured before the file was read. Never overwrite that parsed
+            // state with the older snapshot from this same merge pass.
+            if transcriptStatusRefreshIDs.contains(pending.id),
+               let transcriptStatus = transcriptStates[pending.id]?.codexTaskStatus
+            {
+                session.status = transcriptStatus
+            } else {
+                session.status = pending.status
+                session.lastActivity = pending.activity
+            }
             if sessions[pending.id] != session { sessions[pending.id] = session }
+        }
+    }
+
+    private static func bridgeStatus(forCodexTurn status: String) -> BridgeSessionStatus? {
+        switch status {
+        case "inProgress": .inProgress
+        case "completed": .completed
+        case "interrupted": .interrupted
+        case "failed": .failed
+        default: nil
         }
     }
 
@@ -612,13 +745,13 @@ final class AgentBridgeService {
     }
 
     private func isCodexDesktopOriginator(_ originator: String) -> Bool {
-        let normalized = originator.lowercased()
-        return normalized.contains("codex desktop") || normalized.contains("codex_work_desktop")
+        let normalized = originator.lowercased().filter { $0.isLetter || $0.isNumber }
+        return normalized.contains("codexdesktop") || normalized.contains("codexworkdesktop")
     }
 
-    func sessionsRevision() -> UInt64 {
+    func sessionsRevision(detailSessionID: String? = nil) -> UInt64 {
         stateQueue.sync {
-            prepareSessionsLocked()
+            prepareSessionsLocked(detailSessionID: detailSessionID)
             return sessionRevision
         }
     }
@@ -765,17 +898,30 @@ final class AgentBridgeService {
 
     private enum CodexUsageError: Error { case unavailable }
 
-    private func prepareSessionsLocked() {
-        refreshTranscriptStreamsLocked()
+    private func prepareSessionsLocked(detailSessionID: String? = nil) {
+        if let detailSessionID {
+            refreshTranscriptStreamsLocked(sessionID: detailSessionID)
+        }
+        let now = Date()
+        if now.timeIntervalSince(lastBackgroundTranscriptRefresh) >= 1 {
+            refreshTranscriptStreamsLocked(excludingSessionID: detailSessionID)
+            lastBackgroundTranscriptRefresh = now
+        }
         let staleCutoff = Date().addingTimeInterval(-12 * 60 * 60)
         var staleSessionIDs = sessions.compactMap { identifier, session in
-            let needsAttention = session.status == .waitingForApproval || session.status == .waitingForAnswer
-            return !needsAttention && session.lastActivity <= staleCutoff ? identifier : nil
+            let mustRetain = [
+                BridgeSessionStatus.active,
+                .inProgress,
+                .pending,
+                .waitingForApproval,
+                .waitingForAnswer
+            ].contains(session.status)
+            return !mustRetain && session.lastActivity <= staleCutoff ? identifier : nil
         }
         let retainedCount = 30
         if sessions.count - staleSessionIDs.count > retainedCount {
             let additional = sessions.values
-                .filter { $0.status == .completed || $0.status == .idle }
+                .filter { $0.status == .completed || $0.status == .idle || $0.status == .interrupted || $0.status == .failed }
                 .sorted { $0.lastActivity < $1.lastActivity }
                 .prefix(max(0, sessions.count - staleSessionIDs.count - retainedCount))
                 .map(\.id)
@@ -784,6 +930,7 @@ final class AgentBridgeService {
         for identifier in staleSessionIDs {
             sessions.removeValue(forKey: identifier)
             transcriptStates.removeValue(forKey: identifier)
+            codexDesktopFileSizes.removeValue(forKey: identifier)
         }
     }
 
@@ -915,6 +1062,7 @@ final class AgentBridgeService {
                 }
             }
             transcriptStates.removeValue(forKey: sessionID)
+            codexDesktopFileSizes.removeValue(forKey: sessionID)
             codexManagedTurns.remove(sessionID)
             processToStop = runningProcesses.removeValue(forKey: sessionID)
             if let descriptor = pendingConnections.removeValue(forKey: sessionID) {
@@ -1614,6 +1762,25 @@ final class AgentBridgeService {
         var bufferedLineStart = 0
         var finalStatus = "Codex 任务已结束。"
         var failed = false
+        var pendingDelta = ""
+        var lastDeltaFlush = Date.distantPast
+
+        func flushPendingDelta() {
+            guard !pendingDelta.isEmpty else { return }
+            let delta = pendingDelta
+            pendingDelta.removeAll(keepingCapacity: true)
+            lastDeltaFlush = Date()
+            appendAgentStream(delta, sessionID: sessionID, messageID: assistantMessageID)
+        }
+
+        func consumeDelta(_ delta: String) {
+            pendingDelta += delta
+            // Match Claude's display cadence so bursts of app-server events do
+            // not enqueue one full state mutation per token fragment.
+            if Date().timeIntervalSince(lastDeltaFlush) >= 0.033 {
+                flushPendingDelta()
+            }
+        }
 
         do {
             try process.run()
@@ -1657,7 +1824,13 @@ final class AgentBridgeService {
                 while true {
                     let object = try readMessage()
                     if let responseID = object["id"] as? Int, responseID == id { return object }
-                    _ = processCodexNotification(object, sessionID: sessionID, assistantMessageID: assistantMessageID, finished: &finalStatus)
+                    _ = processCodexNotification(
+                        object,
+                        sessionID: sessionID,
+                        assistantMessageID: assistantMessageID,
+                        finished: &finalStatus,
+                        consumeDelta: consumeDelta
+                    )
                 }
             }
 
@@ -1716,7 +1889,13 @@ final class AgentBridgeService {
 
             while process.isRunning {
                 let object = try readMessage()
-                if processCodexNotification(object, sessionID: sessionID, assistantMessageID: assistantMessageID, finished: &finalStatus) {
+                if processCodexNotification(
+                    object,
+                    sessionID: sessionID,
+                    assistantMessageID: assistantMessageID,
+                    finished: &finalStatus,
+                    consumeDelta: consumeDelta
+                ) {
                     process.terminate()
                     break
                 }
@@ -1737,6 +1916,7 @@ final class AgentBridgeService {
             if process.processIdentifier != 0 { process.waitUntilExit() }
             errorPipe.fileHandleForReading.readabilityHandler = nil
         }
+        flushPendingDelta()
 
         stateQueue.async { [weak self] in
             guard let self, var session = self.sessions[sessionID] else { return }
@@ -1744,7 +1924,7 @@ final class AgentBridgeService {
             let wasCanceled = !self.codexManagedTurns.contains(sessionID)
             self.codexManagedTurns.remove(sessionID)
             if wasCanceled {
-                session.status = .idle
+                session.status = .interrupted
                 session.lastActivity = Date()
                 self.trimMessageHistory(&session)
                 self.sessions[sessionID] = session
@@ -1757,7 +1937,7 @@ final class AgentBridgeService {
                 } else {
                     session.messages.append(BridgeMessage(id: UUID(), role: "error", text: finalStatus, createdAt: Date()))
                 }
-                session.status = .idle
+                session.status = .failed
             } else {
                 session.status = .completed
             }
@@ -1771,12 +1951,13 @@ final class AgentBridgeService {
         _ object: [String: Any],
         sessionID: String,
         assistantMessageID: UUID,
-        finished: inout String
+        finished: inout String,
+        consumeDelta: (String) -> Void
     ) -> Bool {
         let method = object["method"] as? String ?? ""
         let params = object["params"] as? [String: Any] ?? [:]
         if method == "item/agentMessage/delta", let delta = params["delta"] as? String, !delta.isEmpty {
-            appendAgentStream(delta, sessionID: sessionID, messageID: assistantMessageID)
+            consumeDelta(delta)
         } else if method == "turn/completed" {
             let status = (params["turn"] as? [String: Any])?["status"] as? String
             finished = status == "completed" ? "Codex 已完成。" : "Codex 任务状态：\(status ?? "未知")"
@@ -1966,7 +2147,7 @@ final class AgentBridgeService {
                 session.lastAssistantMessage = text
             }
             session.resumeID = resumeID ?? session.resumeID
-            session.status = failed ? .idle : .completed
+            session.status = failed ? .failed : .completed
             session.lastActivity = Date()
             self.sessions[sessionID] = session
         }
@@ -2221,6 +2402,7 @@ final class AgentBridgeService {
             switch eventName {
             case "SessionEnd":
                 self.transcriptStates.removeValue(forKey: event.sessionID)
+                self.codexDesktopFileSizes.removeValue(forKey: event.sessionID)
                 if session.isManaged {
                     session.status = .idle
                     self.sessions[event.sessionID] = session
@@ -2300,20 +2482,26 @@ final class AgentBridgeService {
 
     private func registerTranscript(path: String, sessionID: String, tailWindow: UInt64 = 256 * 1024) {
         guard transcriptStates[sessionID]?.path != path else { return }
-        let fileSize = ((try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? NSNumber)?.uint64Value ?? 0
+        let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+        let fileSize = (attributes?[.size] as? NSNumber)?.uint64Value ?? 0
         let startOffset = fileSize > tailWindow ? fileSize - tailWindow : 0
         transcriptStates[sessionID] = TranscriptState(
             path: path,
             offset: startOffset,
             discardLeadingPartial: startOffset > 0,
             currentClaudeMessageID: nil,
-            currentBridgeMessageID: nil
+            currentBridgeMessageID: nil,
+            lastFileWriteAt: attributes?[.modificationDate] as? Date
         )
     }
 
-    private func refreshTranscriptStreamsLocked(sessionID requestedSessionID: String? = nil) {
+    private func refreshTranscriptStreamsLocked(
+        sessionID requestedSessionID: String? = nil,
+        excludingSessionID: String? = nil
+    ) {
         let sessionIDs = requestedSessionID.map { [$0] } ?? Array(transcriptStates.keys)
         for sessionID in sessionIDs {
+            guard sessionID != excludingSessionID else { continue }
             guard var state = transcriptStates[sessionID],
                   var session = sessions[sessionID],
                   !session.isManaged
@@ -2356,6 +2544,9 @@ final class AgentBridgeService {
             let newData = (try? handle.read(upToCount: maximumReadSize)) ?? Data()
             try? handle.close()
             state.offset += UInt64(newData.count)
+            // Keep this tied to filesystem activity. Polling/read time is not
+            // itself evidence that Codex is still writing the transcript.
+            state.lastFileWriteAt = (try? FileManager.default.attributesOfItem(atPath: state.path)[.modificationDate]) as? Date
             guard !newData.isEmpty else {
                 transcriptStates[sessionID] = state
                 continue
@@ -2483,8 +2674,8 @@ final class AgentBridgeService {
                     state.codexTaskStatus = .completed
                     session.lastActivity = Date()
                 case "turn_aborted":
-                    session.status = .idle
-                    state.codexTaskStatus = .idle
+                    session.status = .interrupted
+                    state.codexTaskStatus = .interrupted
                     session.lastActivity = Date()
                 default:
                     break

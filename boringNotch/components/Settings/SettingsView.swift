@@ -125,6 +125,11 @@ struct SettingsView: View {
         .frame(width: 700)
         .background(Color(NSColor.windowBackgroundColor))
         .tint(.effectiveAccent)
+        // Boring Notch's settings copy and the rest of its preferences are
+        // Chinese-first. Some Macs keep this app's preferred language set to
+        // English, which left translated string-catalog entries untranslated
+        // in an otherwise Chinese settings window.
+        .environment(\.locale, Locale(identifier: "zh-Hans"))
         .id(accentColorUpdateTrigger)
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("AccentColorChanged"))) { _ in
             accentColorUpdateTrigger = UUID()

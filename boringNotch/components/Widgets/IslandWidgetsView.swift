@@ -112,7 +112,7 @@ struct IslandWidgetsView: View {
             }
             managerRefreshCodexUsage()
         }
-        .onChange(of: agentManager.agentSessions.filter { $0.source.lowercased() == "codex" && $0.status != .completed }.map(\.id)) { _, _ in
+        .onChange(of: agentManager.agentSessions.filter { $0.source.lowercased() == "codex" && $0.status.isRunningOrWaiting }.map(\.id)) { _, _ in
             managerRefreshCodexUsage()
         }
     }
@@ -130,7 +130,7 @@ struct IslandWidgetsView: View {
 
     private func managerRefreshCodexUsage() {
         let active = agentManager.agentSessions.filter {
-            $0.source.lowercased() == "codex" && $0.status != .completed
+            $0.source.lowercased() == "codex" && $0.status.isRunningOrWaiting
         }.map(\.id)
         agentManager.refreshCodexUsageIfNeeded(activeSessionIDs: active)
     }
@@ -233,7 +233,7 @@ private enum IslandWidgetKind: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .agents: "Agent 任务"
-        case .quickActions: "任务快捷控制"
+        case .quickActions: "快捷指令"
         case .codexUsage: "Codex 额度"
         }
     }
@@ -241,7 +241,7 @@ private enum IslandWidgetKind: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .agents: "terminal"
-        case .quickActions: "switch.2"
+        case .quickActions: "bolt.fill"
         case .codexUsage: "gauge.with.needle"
         }
     }
@@ -250,9 +250,19 @@ private enum IslandWidgetKind: String, CaseIterable, Identifiable {
 private struct IslandWidgetCard: View {
     let kind: IslandWidgetKind
     @ObservedObject private var agentManager = AgentSessionManager.shared
+    @ObservedObject private var shortcutService = ShortcutActionService.shared
+    @AppStorage("islandShortcutNames") private var storedShortcutNames = "[]"
+    @State private var showingShortcutPicker = false
+
+    private var selectedShortcutNames: [String] {
+        guard let data = storedShortcutNames.data(using: .utf8),
+              let names = try? JSONDecoder().decode([String].self, from: data)
+        else { return [] }
+        return Array(names.prefix(4))
+    }
 
     private var activeSessions: [AgentSession] {
-        agentManager.agentSessions.filter { [.active, .inProgress, .pending].contains($0.status) }
+        agentManager.agentSessions.filter { $0.status.isRunningOrWaiting }
     }
 
     private var currentSession: AgentSession? {
@@ -261,9 +271,34 @@ private struct IslandWidgetCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Label(kind.title, systemImage: kind.symbol)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
+            HStack {
+                Label(kind.title, systemImage: kind.symbol)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 2)
+                if kind == .quickActions {
+                    Button {
+                        shortcutService.scanIfNeeded()
+                        showingShortcutPicker = true
+                    } label: {
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 22, height: 20)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("选择要显示的快捷指令")
+                    .popover(isPresented: $showingShortcutPicker, arrowEdge: .top) {
+                        ShortcutSelectionPicker(
+                            selectedNames: selectedShortcutNames,
+                            onSave: saveShortcutNames
+                        )
+                        .frame(width: 280, height: 340)
+                        .preferredColorScheme(.dark)
+                    }
+                }
+            }
             content
             Spacer(minLength: 0)
         }
@@ -315,43 +350,59 @@ private struct IslandWidgetCard: View {
             }
         case .quickActions:
             VStack(alignment: .leading, spacing: 4) {
-                if let currentSession {
-                    HStack(spacing: 5) {
-                        Circle().fill(currentSession.status.color).frame(width: 6, height: 6)
-                        Text("\(currentSession.source.lowercased() == "codex" ? "Codex" : "Claude Code") · \(currentSession.status.label)")
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    Text(currentSession.displayName)
-                        .font(.system(size: 10, weight: .medium))
-                        .lineLimit(1)
-                    HStack(spacing: 6) {
-                        Button("打开对话") { agentManager.requestOpen(currentSession) }
-                            .buttonStyle(.bordered)
-                            .controlSize(.mini)
-                        if [.active, .inProgress].contains(currentSession.status) {
-                            Button("停止任务") { agentManager.sendMessage("/stop", to: currentSession.id) }
-                                .buttonStyle(.bordered)
-                                .controlSize(.mini)
-                        }
-                        if let cwd = currentSession.cwd, !cwd.isEmpty {
-                            Button("工作目录") { NSWorkspace.shared.open(URL(fileURLWithPath: cwd)) }
-                                .buttonStyle(.borderless)
-                                .controlSize(.mini)
-                        }
-                    }
-                } else {
-                    Text("还没有 Agent 任务")
+                if selectedShortcutNames.isEmpty {
+                    Text("把常用操作放到灵动岛")
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
-                    Button(agentManager.isInstallingHooks ? "正在连接…" : "连接 Claude Code 与 Codex") {
-                        agentManager.installHooks()
+                    Button("选择快捷指令") {
+                        shortcutService.scanIfNeeded()
+                        showingShortcutPicker = true
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.mini)
-                    .disabled(agentManager.isInstallingHooks)
+                } else {
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 5) {
+                        ForEach(selectedShortcutNames, id: \.self) { name in
+                            Button {
+                                shortcutService.run(name)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    if shortcutService.runningName == name {
+                                        ProgressView().controlSize(.mini).scaleEffect(0.6)
+                                    } else {
+                                        Image(systemName: shortcutService.lastCompletedName == name ? "checkmark.circle.fill" : "play.fill")
+                                            .font(.system(size: 8, weight: .semibold))
+                                    }
+                                    Text(name)
+                                        .font(.system(size: 9, weight: .medium))
+                                        .lineLimit(1)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .padding(.horizontal, 6)
+                                .frame(height: 25)
+                                .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 7))
+                                .contentShape(RoundedRectangle(cornerRadius: 7))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(shortcutService.runningName != nil)
+                            .help("运行快捷指令：\(name)")
+                        }
+                    }
+                    if let lastError = shortcutService.lastError {
+                        Text(lastError)
+                            .font(.system(size: 8))
+                            .foregroundStyle(.red.opacity(0.9))
+                    } else if let completed = shortcutService.lastCompletedName {
+                        Text(shortcutService.lastOutput ?? "已完成：\(completed)")
+                            .font(.system(size: 8))
+                            .foregroundStyle(.green)
+                            .lineLimit(2)
+                            .truncationMode(.tail)
+                    }
                 }
+            }
+            .onAppear {
+                shortcutService.scanIfNeeded()
             }
         case .codexUsage:
             VStack(alignment: .leading, spacing: 5) {
@@ -385,5 +436,112 @@ private struct IslandWidgetCard: View {
                     .tint(remaining < 15 ? .orange : .white)
             }
         }
+    }
+
+    private func saveShortcutNames(_ names: [String]) {
+        guard let data = try? JSONEncoder().encode(Array(names.prefix(4))),
+              let encoded = String(data: data, encoding: .utf8)
+        else { return }
+        storedShortcutNames = encoded
+    }
+}
+
+private struct ShortcutSelectionPicker: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var service = ShortcutActionService.shared
+    @State private var searchText = ""
+    @State private var selection: [String]
+    let onSave: ([String]) -> Void
+
+    init(selectedNames: [String], onSave: @escaping ([String]) -> Void) {
+        _selection = State(initialValue: Array(selectedNames.prefix(4)))
+        self.onSave = onSave
+    }
+
+    private var filteredNames: [String] {
+        guard !searchText.isEmpty else { return service.names }
+        return service.names.filter { $0.localizedCaseInsensitiveContains(searchText) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("快捷指令")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("选择最多 4 个，点击卡片时运行")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    service.scan()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .disabled(service.isScanning)
+            }
+
+            TextField("搜索快捷指令", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+
+            if service.isScanning && service.names.isEmpty {
+                ProgressView("正在读取快捷指令")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if filteredNames.isEmpty {
+                ContentUnavailableView(
+                    "没有找到快捷指令",
+                    systemImage: "bolt",
+                    description: Text("请先在 macOS「快捷指令」App 中创建指令，再重新扫描。")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 3) {
+                        ForEach(filteredNames, id: \.self) { name in
+                            let isSelected = selection.contains(name)
+                            Button {
+                                if isSelected {
+                                    selection.removeAll { $0 == name }
+                                } else if selection.count < 4 {
+                                    selection.append(name)
+                                }
+                            } label: {
+                                HStack(spacing: 7) {
+                                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                                    Text(name)
+                                        .lineLimit(1)
+                                    Spacer(minLength: 0)
+                                }
+                                .font(.system(size: 10))
+                                .padding(.horizontal, 8)
+                                .frame(height: 27)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!isSelected && selection.count >= 4)
+                            .background(isSelected ? Color.white.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+                        }
+                    }
+                }
+            }
+
+            HStack {
+                Text("\(selection.count)/4 已选")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("完成") {
+                    onSave(selection)
+                    dismiss()
+                }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+            }
+        }
+        .padding(12)
+        .onAppear { service.scanIfNeeded() }
     }
 }

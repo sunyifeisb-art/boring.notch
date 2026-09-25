@@ -269,11 +269,11 @@ final class XPCHelperClient: NSObject {
         }
     }
 
-    nonisolated func agentSessionsRevision() async -> UInt64? {
+    nonisolated func agentSessionsRevision(detailSessionID: String?) async -> UInt64? {
         do {
             let service = await MainActor.run { ensureRemoteService() }
             let result: NSNumber = try await service.withContinuation { service, continuation in
-                service.agentSessionsRevision { revision in
+                service.agentSessionsRevision(detailSessionID as NSString?) { revision in
                     continuation.resume(returning: revision)
                 }
             }
@@ -304,6 +304,31 @@ final class XPCHelperClient: NSObject {
             return result as Data
         } catch {
             return Data("[]".utf8)
+        }
+    }
+
+    nonisolated func shortcutNamesJSON() async -> Data {
+        do {
+            let service = await MainActor.run { ensureRemoteService() }
+            let result: NSData = try await service.withContinuation { service, continuation in
+                service.shortcutNamesJSON { data in continuation.resume(returning: data) }
+            }
+            return result as Data
+        } catch {
+            return Data("[]".utf8)
+        }
+    }
+
+    nonisolated func runShortcut(_ name: String) async -> Data {
+        do {
+            let service = await MainActor.run { ensureRemoteService() }
+            let result: NSData = try await service.withContinuation { service, continuation in
+                service.runShortcut(name) { data in continuation.resume(returning: data) }
+            }
+            return result as Data
+        } catch {
+            return (try? JSONEncoder().encode(ShortcutActionExecution(output: nil, error: error.localizedDescription)))
+                ?? Data("{}".utf8)
         }
     }
 

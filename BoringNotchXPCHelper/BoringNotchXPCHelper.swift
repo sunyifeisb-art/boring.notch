@@ -155,8 +155,8 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
         agentBridge.stop()
     }
 
-    @objc func agentSessionsRevision(with reply: @escaping (NSNumber) -> Void) {
-        reply(NSNumber(value: agentBridge.sessionsRevision()))
+    @objc func agentSessionsRevision(_ detailSessionID: NSString?, with reply: @escaping (NSNumber) -> Void) {
+        reply(NSNumber(value: agentBridge.sessionsRevision(detailSessionID: detailSessionID as String?)))
     }
 
     @objc func agentSessionsJSON(_ detailSessionID: NSString?, with reply: @escaping (NSData) -> Void) {
@@ -170,6 +170,18 @@ class BoringNotchXPCHelper: NSObject, BoringNotchXPCHelperProtocol {
     @objc func widgetCatalogJSON(with reply: @escaping (NSData) -> Void) {
         DispatchQueue.global(qos: .utility).async {
             reply(WidgetCatalogScanner.scan() as NSData)
+        }
+    }
+
+    @objc func shortcutNamesJSON(with reply: @escaping (NSData) -> Void) {
+        DispatchQueue.global(qos: .utility).async {
+            reply(ShortcutActionRunner.shortcutNamesJSON() as NSData)
+        }
+    }
+
+    @objc func runShortcut(_ name: String, with reply: @escaping (NSData) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            reply(ShortcutActionRunner.runJSON(name: name) as NSData)
         }
     }
 

@@ -90,6 +90,8 @@ enum AgentSessionStatus: String, Codable, Sendable {
     case pending
     case inProgress = "in_progress"
     case completed
+    case interrupted
+    case failed
     case waitingForApproval = "waiting_for_approval"
     case waitingForAnswer = "waiting_for_answer"
 
@@ -103,6 +105,8 @@ enum AgentSessionStatus: String, Codable, Sendable {
         case .idle: return "就绪"
         case .pending: return "等待中"
         case .completed: return "已完成"
+        case .interrupted: return "已中断"
+        case .failed: return "执行失败"
         case .waitingForApproval: return "等待批准"
         case .waitingForAnswer: return "等待回答"
         }
@@ -112,10 +116,21 @@ enum AgentSessionStatus: String, Codable, Sendable {
         switch self {
         case .active, .inProgress: return .blue
         case .idle, .completed: return .green
+        case .interrupted: return .secondary
+        case .failed: return .red
         case .pending: return .yellow
         case .waitingForApproval: return .orange
         case .waitingForAnswer: return .cyan
         }
+    }
+
+    var isTerminal: Bool {
+        self == .completed || self == .interrupted || self == .failed
+    }
+
+    var isRunningOrWaiting: Bool {
+        self == .active || self == .inProgress || self == .pending
+            || self == .waitingForApproval || self == .waitingForAnswer
     }
 }
 

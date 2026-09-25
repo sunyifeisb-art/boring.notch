@@ -14,6 +14,7 @@
 		D44A0010C0DE000000000004 /* WidgetCatalogService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A0010C0DE000000000005 /* WidgetCatalogService.swift */; };
 		D44A0010C0DE000000000006 /* BluetoothAccessoryMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A0010C0DE000000000007 /* BluetoothAccessoryMonitor.swift */; };
 		D44A0010C0DE000000000008 /* AirDropTransferMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A0010C0DE000000000009 /* AirDropTransferMonitor.swift */; };
+		D44A0010C0DE000000000010 /* ShortcutActionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A0010C0DE000000000011 /* ShortcutActionService.swift */; };
 		1100290C2E847E2800035A57 /* NSItemProvider+LoadHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1100290B2E847E2800035A57 /* NSItemProvider+LoadHelpers.swift */; };
 		110029272E84FD4C00035A57 /* TemporaryFileStorageService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110029262E84FD4C00035A57 /* TemporaryFileStorageService.swift */; };
 		1100292A2E8691B400035A57 /* FileShareView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110029292E8691B400035A57 /* FileShareView.swift */; };
@@ -196,6 +197,7 @@
 		D44A0010C0DE000000000005 /* WidgetCatalogService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetCatalogService.swift; sourceTree = "<group>"; };
 		D44A0010C0DE000000000007 /* BluetoothAccessoryMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BluetoothAccessoryMonitor.swift; sourceTree = "<group>"; };
 		D44A0010C0DE000000000009 /* AirDropTransferMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirDropTransferMonitor.swift; sourceTree = "<group>"; };
+		D44A0010C0DE000000000011 /* ShortcutActionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutActionService.swift; sourceTree = "<group>"; };
 		1100290B2E847E2800035A57 /* NSItemProvider+LoadHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NSItemProvider+LoadHelpers.swift"; sourceTree = "<group>"; };
 		110029262E84FD4C00035A57 /* TemporaryFileStorageService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TemporaryFileStorageService.swift; sourceTree = "<group>"; };
 		110029292E8691B400035A57 /* FileShareView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileShareView.swift; sourceTree = "<group>"; };
@@ -530,6 +532,7 @@
 			children = (
 				D44A0010C0DE000000000001 /* IslandWidgetsView.swift */,
 				D44A0010C0DE000000000005 /* WidgetCatalogService.swift */,
+				D44A0010C0DE000000000011 /* ShortcutActionService.swift */,
 			);
 			path = Widgets;
 			sourceTree = "<group>";
@@ -884,6 +887,7 @@
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				en,
+				"zh-Hans",
 				Base,
 			);
 			mainGroup = 14CEF4092C5CAED200855D72;
@@ -948,6 +952,7 @@
 			files = (
 				D44A0010C0DE000000000002 /* IslandWidgetsView.swift in Sources */,
 				D44A0010C0DE000000000004 /* WidgetCatalogService.swift in Sources */,
+				D44A0010C0DE000000000010 /* ShortcutActionService.swift in Sources */,
 				A16E00012F10000100A61E01 /* AgentSession.swift in Sources */,
 				A16E00022F10000100A61E01 /* AgentSessionManager.swift in Sources */,
 				A16E00032F10000100A61E01 /* AgentSessionsView.swift in Sources */,
