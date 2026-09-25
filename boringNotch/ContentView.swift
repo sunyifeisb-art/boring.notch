@@ -35,6 +35,7 @@ struct ContentView: View {
     @State private var anyDropDebounceTask: Task<Void, Never>?
     @State private var agentChromeRevision = 0
     @State private var lastAgentMessageSubmittedAt: Date?
+    @State private var isAgentComposerFocused = false
 
     @State private var gestureProgress: CGFloat = .zero
 
@@ -334,6 +335,14 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .agentMessageSubmitted)) { _ in
             lastAgentMessageSubmittedAt = Date()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .agentComposerFocusChanged)) { notification in
+            isAgentComposerFocused = notification.userInfo?["focused"] as? Bool ?? false
+            if isAgentComposerFocused {
+                hoverTask?.cancel()
+            } else if vm.notchState == .open, !vm.isMouseHovering() {
+                scheduleCloseAfterHoverExit()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .agentChromeStateChanged)) { _ in
             agentChromeRevision &+= 1
@@ -690,6 +699,13 @@ struct ContentView: View {
                 }
                 
                 await MainActor.run {
+                    if self.isAgentComposerFocused {
+                        withAnimation(self.animationSpring) {
+                            self.isHovering = false
+                        }
+                        return
+                    }
+
                     // Return can briefly make SwiftUI report a false hover exit
                     // while the focused transcript is replaced. Re-check after a
                     // short settling interval so sending by itself never closes.
@@ -707,6 +723,25 @@ struct ContentView: View {
                     }
                 }
             }
+        }
+    }
+
+    private func scheduleCloseAfterHoverExit() {
+        hoverTask?.cancel()
+        hoverTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled,
+                  !isAgentComposerFocused,
+                  vm.notchState == .open,
+                  !vm.isMouseHovering(),
+                  !vm.isBatteryPopoverActive,
+                  !SharingStateManager.shared.preventNotchClose
+            else { return }
+
+            withAnimation(animationSpring) {
+                isHovering = false
+            }
+            vm.close()
         }
     }
 

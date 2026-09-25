@@ -81,12 +81,24 @@ struct AgentSessionsView: View {
         .onChange(of: activeCodexSessionIDs) { _, identifiers in
             manager.refreshCodexUsageIfNeeded(activeSessionIDs: identifiers)
         }
+        .onChange(of: composerFocused) { _, focused in
+            NotificationCenter.default.post(
+                name: .agentComposerFocusChanged,
+                object: nil,
+                userInfo: ["focused": focused]
+            )
+        }
         .onAppear {
             consumeOpenRequest(manager.requestedOpenSessionID)
             manager.refreshCodexUsageIfNeeded(activeSessionIDs: activeCodexSessionIDs)
             updateNotchSize(hasDetail: detailSessionID != nil)
         }
         .onDisappear {
+            NotificationCenter.default.post(
+                name: .agentComposerFocusChanged,
+                object: nil,
+                userInfo: ["focused": false]
+            )
             guard vm.notchState == .open else { return }
             withAnimation(.snappy(duration: 0.22)) {
                 vm.notchSize = openNotchSize
