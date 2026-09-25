@@ -18,7 +18,8 @@ struct AgentSessionsView: View {
     @State private var isDroppingFileContext = false
     @State private var composerWindow: NSWindow?
     @AppStorage("agentIslandShowRecentCompleted") private var showCompleted = false
-    @FocusState private var composerFocused: Bool
+    @State private var composerFocused = false
+    @State private var composerFocusRequest = 0
 
     private var displayedSessions: [AgentSession] {
         let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
@@ -100,10 +101,14 @@ struct AgentSessionsView: View {
             }
             let prompt = pendingNewConversationPrompt
             pendingNewConversationPrompt = nil
-            manager.newConversation(cwd: directory.path, prompt: prompt)
+            manager.newConversation(cwd: directory.path, prompt: prompt, openInIsland: true)
             focusComposer()
         }
         .onChange(of: manager.sessions.map(\.id)) { _, identifiers in
+            if let requestedID = manager.requestedOpenSessionID,
+               identifiers.contains(requestedID) {
+                consumeOpenRequest(requestedID)
+            }
             if let detailSessionID, !identifiers.contains(detailSessionID) {
                 self.detailSessionID = nil
             }
@@ -565,26 +570,23 @@ struct AgentSessionsView: View {
                 .help(manager.codexUsage?.error ?? "Codex 活跃任务额度；点击刷新")
             }
 
-            TextField(composerPlaceholder(for: target), text: $draft)
-                .textFieldStyle(.plain)
-                .font(.system(size: showsTarget ? 11 : 12.5))
-                .focused($composerFocused)
+            AgentComposerTextField(
+                text: $draft,
+                isFocused: $composerFocused,
+                placeholder: composerPlaceholder(for: target),
+                fontSize: showsTarget ? 11 : 12.5,
+                focusRequest: composerFocusRequest,
+                onSubmit: { sendDraft(to: target) }
+            )
+                .frame(maxWidth: .infinity)
                 .background(AgentComposerWindowReader { window in
                     if composerWindow !== window {
                         composerWindow = window
-                        if composerFocused, let panel = window as? BoringNotchSkyLightWindow {
-                            panel.makeKey()
+                        if composerFocusRequest > 0 {
+                            focusComposer()
                         }
                     }
                 })
-                .simultaneousGesture(
-                    TapGesture().onEnded {
-                        focusComposer()
-                    }
-                )
-                .onSubmit {
-                    sendDraft(to: target)
-                }
 
             Button {
                 sendDraft(to: target)
@@ -631,7 +633,7 @@ struct AgentSessionsView: View {
             manager.sendMessage(message, to: target.id)
         } else {
             if manager.hasDefaultWorkingDirectory {
-                manager.newConversation(prompt: message)
+                manager.newConversation(prompt: message, openInIsland: true)
             } else {
                 pendingNewConversationPrompt = message
                 showsDirectoryPicker = true
@@ -659,7 +661,7 @@ struct AgentSessionsView: View {
         detailSessionID = nil
         pendingNewConversationPrompt = nil
         if manager.hasDefaultWorkingDirectory {
-            manager.newConversation()
+            manager.newConversation(openInIsland: true)
         } else {
             showsDirectoryPicker = true
         }
@@ -675,14 +677,13 @@ struct AgentSessionsView: View {
     }
 
     private func focusComposer() {
-        // `nonactivatingPanel` intentionally keeps the user's current app
-        // active. Explicitly making the visible notch panel key gives its
-        // TextField first-responder status without switching applications.
+        composerFocusRequest &+= 1
+        // A FocusState can remain true after another desktop text field takes
+        // the key window. A monotonically increasing request forces the native
+        // composer to reclaim first-responder status even when that binding did
+        // not change.
         if let panel = composerWindow as? BoringNotchSkyLightWindow, panel.isVisible {
             panel.makeKey()
-        }
-        DispatchQueue.main.async {
-            composerFocused = true
         }
     }
 
@@ -2107,6 +2108,115 @@ private struct AgentComposerWindowReader: NSViewRepresentable {
                       self.resolvedWindow !== window else { return }
                 self.resolvedWindow = window
                 self.onResolve(window)
+            }
+        }
+    }
+}
+
+private struct AgentComposerTextField: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var isFocused: Bool
+    let placeholder: String
+    let fontSize: CGFloat
+    let focusRequest: Int
+    let onSubmit: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(string: text)
+        field.isBordered = false
+        field.isBezeled = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.isEditable = true
+        field.isSelectable = true
+        field.font = .systemFont(ofSize: fontSize)
+        field.textColor = .labelColor
+        field.cell?.usesSingleLineMode = true
+        field.cell?.wraps = false
+        field.cell?.isScrollable = true
+        field.cell?.lineBreakMode = .byTruncatingTail
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        field.delegate = context.coordinator
+        context.coordinator.field = field
+        updatePlaceholder(for: field)
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        context.coordinator.parent = self
+        field.font = .systemFont(ofSize: fontSize)
+        if field.stringValue != text {
+            field.stringValue = text
+        }
+        updatePlaceholder(for: field)
+
+        guard focusRequest > 0,
+              context.coordinator.lastAppliedFocusRequest != focusRequest
+        else { return }
+        context.coordinator.lastAppliedFocusRequest = focusRequest
+        context.coordinator.requestFocus()
+    }
+
+    private func updatePlaceholder(for field: NSTextField) {
+        field.placeholderAttributedString = NSAttributedString(
+            string: placeholder,
+            attributes: [
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .font: NSFont.systemFont(ofSize: fontSize)
+            ]
+        )
+        field.setAccessibilityLabel(placeholder)
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: AgentComposerTextField
+        weak var field: NSTextField?
+        var lastAppliedFocusRequest = 0
+
+        init(parent: AgentComposerTextField) {
+            self.parent = parent
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            parent.text = field.stringValue
+        }
+
+        func controlTextDidBeginEditing(_ notification: Notification) {
+            parent.isFocused = true
+        }
+
+        func controlTextDidEndEditing(_ notification: Notification) {
+            parent.isFocused = false
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            guard commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
+            parent.onSubmit()
+            return true
+        }
+
+        func requestFocus() {
+            guard let field, let window = field.window, window.isVisible else { return }
+            if let panel = window as? BoringNotchSkyLightWindow {
+                panel.makeKey()
+            } else {
+                window.makeKey()
+            }
+
+            DispatchQueue.main.async { [weak self, weak field, weak window] in
+                guard let self, let field, let window, window.isVisible else { return }
+                if !window.isKeyWindow { window.makeKey() }
+                guard window.isKeyWindow else { return }
+                let editor = field.currentEditor()
+                if window.firstResponder !== field, window.firstResponder !== editor {
+                    window.makeFirstResponder(field)
+                }
             }
         }
     }

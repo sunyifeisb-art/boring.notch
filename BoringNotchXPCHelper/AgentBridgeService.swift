@@ -1526,13 +1526,15 @@ final class AgentBridgeService {
             // Sessions discovered by Claude hooks are already running in Ghostty.
             // Route messages and native slash commands to that exact terminal
             // instead of starting a second claude --resume process.
-            if let existing, !existing.isManaged {
+            // `/new` must always create a separate Claude task. Converting it
+            // to `/clear` in the selected interactive terminal erased the
+            // user's existing conversation whenever the new-task command was
+            // routed with that session ID.
+            if let existing, !existing.isManaged,
+               trimmed != "/new", !trimmed.hasPrefix("/new ") {
                 var commands = [trimmed]
-                if trimmed == "/new" || trimmed == "/clear" {
+                if trimmed == "/clear" {
                     commands = ["/clear"]
-                } else if trimmed.hasPrefix("/new ") {
-                    let prompt = String(trimmed.dropFirst(5)).trimmingCharacters(in: .whitespacesAndNewlines)
-                    commands = prompt.isEmpty ? ["/clear"] : ["/clear", prompt]
                 }
                 var updated = existing
                 updated.lastUserText = commands.last

@@ -121,4 +121,15 @@ class BoringNotchSkyLightWindow: NSPanel {
     // type into the notch while keeping the current app frontmost.
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    override func sendEvent(_ event: NSEvent) {
+        // A non-activating panel can remain visible while another app's text
+        // control owns keyboard focus. Promote the island to the key window
+        // before delivering the click so its embedded Agent field receives the
+        // ensuing key events instead of the background app.
+        if event.type == .leftMouseDown, canBecomeKey, !isKeyWindow {
+            makeKey()
+        }
+        super.sendEvent(event)
+    }
 }
