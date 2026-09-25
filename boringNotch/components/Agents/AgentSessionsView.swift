@@ -938,6 +938,20 @@ private struct AgentMessageRow: View, Equatable {
     private var isSystem: Bool { message.role == "system" }
     private var isError: Bool { message.role == "error" }
 
+    static func == (lhs: AgentMessageRow, rhs: AgentMessageRow) -> Bool {
+        guard lhs.message.id == rhs.message.id,
+              lhs.message.role == rhs.message.role,
+              lhs.source == rhs.source,
+              lhs.isStreaming == rhs.isStreaming
+        else { return false }
+
+        // Completed transcript rows are immutable. Comparing their full text
+        // on every live-stream refresh made opening and updating a long
+        // conversation scan every character in every historical message. Only
+        // the one actively streaming row needs its text checked for a redraw.
+        return !lhs.isStreaming || lhs.message.text == rhs.message.text
+    }
+
     var body: some View {
         if isSystem {
             HStack {
