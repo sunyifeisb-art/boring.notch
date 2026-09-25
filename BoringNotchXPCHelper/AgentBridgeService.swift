@@ -1147,6 +1147,11 @@ final class AgentBridgeService {
         var codexInterruptRequest: (id: String, turnID: String)?
         var terminalRequest: (id: String, commands: [String], interrupt: Bool)?
         let resultID: String? = stateQueue.sync {
+            // The UI's session revision poll refreshes Codex transcript files,
+            // but sending can happen between polls. Refresh this session before
+            // checking its active turn so a newly written task_started event can
+            // supply its turn_id without scanning unrelated sessions.
+            if let sessionID { refreshTranscriptStreamsLocked(sessionID: sessionID) }
             let existing = sessionID.flatMap { sessions[$0] }
             let resolvedSource = existing?.source ?? source.lowercased()
             let resolvedCWD = existing?.cwd ?? cwd
@@ -2274,8 +2279,9 @@ final class AgentBridgeService {
         )
     }
 
-    private func refreshTranscriptStreamsLocked() {
-        for sessionID in Array(transcriptStates.keys) {
+    private func refreshTranscriptStreamsLocked(sessionID requestedSessionID: String? = nil) {
+        let sessionIDs = requestedSessionID.map { [$0] } ?? Array(transcriptStates.keys)
+        for sessionID in sessionIDs {
             guard var state = transcriptStates[sessionID],
                   var session = sessions[sessionID],
                   !session.isManaged
