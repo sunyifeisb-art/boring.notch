@@ -28,6 +28,7 @@ final class AgentSessionManager: ObservableObject {
     private var pollingTask: Task<Void, Never>?
     private var attentionSessionIDs = Set<String>()
     private var lastBridgeRevision: UInt64?
+    private var lastBridgeDetailedSessionID: String?
     private var refreshInProgress = false
     private var lastAutomaticCodexUsageRefresh: Date?
     private var lastAutomaticCodexUsageSessionIDs = Set<String>()
@@ -98,6 +99,7 @@ final class AgentSessionManager: ObservableObject {
         activeWorkspaceAccessURL = nil
         activeWorkspaceAccessStarted = false
         lastBridgeRevision = nil
+        lastBridgeDetailedSessionID = nil
         sessions.removeAll(keepingCapacity: false)
         attentionSessionIDs.removeAll(keepingCapacity: false)
         selectedSessionID = nil
@@ -112,11 +114,14 @@ final class AgentSessionManager: ObservableObject {
         defer { refreshInProgress = false }
 
         let revision = await XPCHelperClient.shared.agentSessionsRevision()
-        if !force, let revision, revision == lastBridgeRevision {
+        let detailSessionID = BoringViewCoordinator.shared.currentView == .agents ? selectedSessionID : nil
+        if !force, let revision, revision == lastBridgeRevision,
+           detailSessionID == lastBridgeDetailedSessionID
+        {
             return
         }
 
-        let data = await XPCHelperClient.shared.agentSessionsJSON()
+        let data = await XPCHelperClient.shared.agentSessionsJSON(detailSessionID: detailSessionID)
         guard let updatedSessions = await Task.detached(priority: .utility, operation: {
             autoreleasepool {
                 let decoder = JSONDecoder()
@@ -126,6 +131,7 @@ final class AgentSessionManager: ObservableObject {
         }).value else { return }
 
         lastBridgeRevision = revision
+        lastBridgeDetailedSessionID = detailSessionID
         // The bridge revision already tells us whether a session changed. Comparing
         // full transcripts here walks every character on the main actor on each
         // streaming update, which can stall the island as replies grow.

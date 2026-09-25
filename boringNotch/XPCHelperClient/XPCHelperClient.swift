@@ -255,11 +255,11 @@ final class XPCHelperClient: NSObject {
         }
     }
 
-    nonisolated func agentSessionsJSON() async -> Data {
+    nonisolated func agentSessionsJSON(detailSessionID: String?) async -> Data {
         do {
             let service = await MainActor.run { ensureRemoteService() }
             let result: NSData = try await service.withContinuation { service, continuation in
-                service.agentSessionsJSON { data in
+                service.agentSessionsJSON(detailSessionID as NSString?) { data in
                     continuation.resume(returning: data)
                 }
             }

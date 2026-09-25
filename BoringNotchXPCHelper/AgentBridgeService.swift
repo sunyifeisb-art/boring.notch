@@ -253,10 +253,12 @@ final class AgentBridgeService {
     private let transcriptDecoder = JSONDecoder()
     private var sessionRevision: UInt64 = 1
     private var cachedSessionsJSON: Data?
+    private var cachedSessionsJSONDetailID: String?
     private var sessions: [String: BridgeSession] = [:] {
         didSet {
             sessionRevision &+= 1
             cachedSessionsJSON = nil
+            cachedSessionsJSONDetailID = nil
         }
     }
     private var streamCharacterCounts: [UUID: Int] = [:]
@@ -600,15 +602,23 @@ final class AgentBridgeService {
         }
     }
 
-    func sessionsJSON() -> Data {
+    func sessionsJSON(detailSessionID: String?) -> Data {
         stateQueue.sync {
             // The client checks sessionsRevision immediately before asking for
             // this snapshot. That revision check already refreshes transcript
             // files; doing it again here doubled file reads and JSONL parsing
             // on every active streaming update.
-            if let cachedSessionsJSON { return cachedSessionsJSON }
+            if cachedSessionsJSONDetailID == detailSessionID,
+               let cachedSessionsJSON
+            {
+                return cachedSessionsJSON
+            }
 
-            let ordered = sessions.values.map(clientVisibleSession).sorted {
+            let ordered = sessions.values.map { session in
+                session.id == detailSessionID
+                    ? clientVisibleSession(session)
+                    : clientVisibleSummarySession(session)
+            }.sorted {
                 let lhsAttention = $0.status == .waitingForApproval || $0.status == .waitingForAnswer
                 let rhsAttention = $1.status == .waitingForApproval || $1.status == .waitingForAnswer
                 if lhsAttention != rhsAttention { return lhsAttention }
@@ -618,6 +628,7 @@ final class AgentBridgeService {
             encoder.dateEncodingStrategy = .iso8601
             let data = (try? encoder.encode(ordered)) ?? Data("[]".utf8)
             cachedSessionsJSON = data
+            cachedSessionsJSONDetailID = detailSessionID
             return data
         }
     }
@@ -782,6 +793,74 @@ final class AgentBridgeService {
             boundedText($0, maximumCharacters: 4_000)
         }
         return visibleSession
+    }
+
+    private func clientVisibleSummarySession(_ session: BridgeSession) -> BridgeSession {
+        var visibleSession = session
+        let recentMessages = Array(session.messages.suffix(40))
+        visibleSession.messages = recentMessages.enumerated().map { index, message in
+            var summary = message
+            if index < recentMessages.count - 2 {
+                summary.text = ""
+            } else {
+                summary.text = String(message.text.prefix(600))
+            }
+            return summary
+        }
+        visibleSession.lastAssistantMessage = session.lastAssistantMessage.map {
+            String($0.prefix(1_000))
+        }
+        visibleSession.lastUserText = session.lastUserText.map {
+            String($0.prefix(1_000))
+        }
+        if session.status == .waitingForApproval || session.status == .waitingForAnswer {
+            visibleSession.toolInput = session.toolInput.map {
+                boundedToolInput($0, remainingCharacters: 2_000, depth: 0)
+            }
+        } else {
+            visibleSession.toolInput = nil
+        }
+        return visibleSession
+    }
+
+    private func boundedToolInput(
+        _ value: BridgeJSONValue,
+        remainingCharacters: Int,
+        depth: Int
+    ) -> BridgeJSONValue {
+        guard remainingCharacters > 0, depth < 5 else { return .null }
+        switch value {
+        case .string(let text):
+            return .string(String(text.prefix(min(remainingCharacters, 600))))
+        case .number, .bool, .null:
+            return value
+        case .array(let values):
+            var remaining = remainingCharacters
+            let bounded = values.prefix(8).map { element -> BridgeJSONValue in
+                let next = boundedToolInput(element, remainingCharacters: remaining, depth: depth + 1)
+                remaining -= Self.estimatedCharacterCount(of: next)
+                return next
+            }
+            return .array(bounded)
+        case .object(let values):
+            var remaining = remainingCharacters
+            var bounded: [String: BridgeJSONValue] = [:]
+            for (key, element) in values.prefix(16) where remaining > 0 {
+                let next = boundedToolInput(element, remainingCharacters: remaining, depth: depth + 1)
+                bounded[key] = next
+                remaining -= key.count + Self.estimatedCharacterCount(of: next)
+            }
+            return .object(bounded)
+        }
+    }
+
+    private static func estimatedCharacterCount(of value: BridgeJSONValue) -> Int {
+        switch value {
+        case .string(let text): text.utf8.count
+        case .number, .bool, .null: 16
+        case .array(let values): values.reduce(2) { $0 + estimatedCharacterCount(of: $1) }
+        case .object(let values): values.reduce(2) { $0 + $1.key.utf8.count + estimatedCharacterCount(of: $1.value) }
+        }
     }
 
     private func boundedText(_ text: String, maximumCharacters: Int) -> String {
