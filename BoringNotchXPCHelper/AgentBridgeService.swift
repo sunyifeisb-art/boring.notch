@@ -291,7 +291,7 @@ final class AgentBridgeService {
     private var codexDesktopObservers: [NSObjectProtocol] = []
     private let codexDesktopQueue = DispatchQueue(label: "theboringteam.boringnotch.codex-desktop-sync", qos: .utility)
     private var codexDesktopRetryAfter = Date.distantPast
-    private var lastFullCodexStatusRefresh = Date.distantPast
+    private var codexDesktopStatusScanOffset = 0
     private var lastBackgroundTranscriptRefresh = Date.distantPast
     private var dismissedSessionIDs = Set<String>()
     private var socketServer: AgentUnixSocketServer?
@@ -381,7 +381,7 @@ final class AgentBridgeService {
         else { return }
         codexDesktopQueue.async { [weak self] in
             self?.codexDesktopRetryAfter = .distantPast
-            self?.lastFullCodexStatusRefresh = .distantPast
+            self?.codexDesktopStatusScanOffset = 0
         }
         let timer = DispatchSource.makeTimerSource(queue: codexDesktopQueue)
         timer.schedule(deadline: .now() + .milliseconds(300), repeating: .seconds(3), leeway: .milliseconds(500))
@@ -433,7 +433,7 @@ final class AgentBridgeService {
             // Discovery also asks for the latest turn status of a small number
             // of recent desktop threads. Keep the whole exchange bounded while
             // giving those lightweight requests time to complete.
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 12, execute: timeout)
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 20, execute: timeout)
             var buffer = Data()
             var nextID = 0
 
@@ -557,18 +557,32 @@ final class AgentBridgeService {
                     return session.id
                 })
             }
-            let refreshAllStatuses = Date().timeIntervalSince(lastFullCodexStatusRefresh) >= 15
-            if refreshAllStatuses { lastFullCodexStatusRefresh = Date() }
+            // Keep each pass bounded. Asking for hundreds of turn summaries in
+            // one serial app-server session exceeded the old 12-second deadline,
+            // causing the helper to discard every result and look permanently
+            // out of sync. Recent tasks and active tasks refresh every pass;
+            // older history is scanned in small rotating batches.
+            let recentStatusCount = min(30, desktopThreads.count)
+            let historyStart = recentStatusCount
+            let historyCount = max(0, desktopThreads.count - historyStart)
+            let historyBatchSize = 20
+            let historyBatchStart = historyCount == 0 ? 0 : codexDesktopStatusScanOffset % historyCount
+            let historyIndices = (0..<min(historyBatchSize, historyCount)).map {
+                historyStart + ((historyBatchStart + $0) % historyCount)
+            }
+            if historyCount > 0 {
+                codexDesktopStatusScanOffset = (historyBatchStart + historyBatchSize) % historyCount
+            } else {
+                codexDesktopStatusScanOffset = 0
+            }
+            let activeIndices = desktopThreads.indices.filter { index in
+                guard let threadID = desktopThreads[index]["id"] as? String else { return false }
+                return knownActiveIDs.contains(threadID)
+            }.prefix(20)
+            let indicesToRefresh = Set(Array(0..<recentStatusCount) + Array(activeIndices) + historyIndices).sorted()
 
-            // Refresh the newest tasks on every pass and keep previously active
-            // tasks pinned to live status. Recheck the entire bounded history
-            // every 15 seconds, which covers older waiting tasks without making
-            // hundreds of turn RPCs on every 3-second poll.
-            for index in desktopThreads.indices {
+            for index in indicesToRefresh {
                 let threadID = desktopThreads[index]["id"] as? String
-                guard refreshAllStatuses || index < 100 || threadID.map(knownActiveIDs.contains) == true else {
-                    continue
-                }
                 guard let threadID,
                       let latestTurnPage = request("thread/turns/list", params: [
                         "threadId": threadID,
