@@ -448,6 +448,7 @@ final class AgentSessionManager: ObservableObject {
 }
 
 extension Notification.Name {
+    static let agentMessageSubmitted = Notification.Name("agentMessageSubmitted")
     static let agentAttentionNeeded = Notification.Name("agentAttentionNeeded")
     static let agentSessionStarted = Notification.Name("agentSessionStarted")
     static let agentChromeStateChanged = Notification.Name("agentChromeStateChanged")

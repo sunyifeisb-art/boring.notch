@@ -34,6 +34,7 @@ struct ContentView: View {
     @State private var isHovering: Bool = false
     @State private var anyDropDebounceTask: Task<Void, Never>?
     @State private var agentChromeRevision = 0
+    @State private var lastAgentMessageSubmittedAt: Date?
 
     @State private var gestureProgress: CGFloat = .zero
 
@@ -333,8 +334,11 @@ struct ContentView: View {
         .onChange(of: coordinator.currentView) { _, view in
             guard vm.notchState == .open, view != .agents else { return }
             withAnimation(.snappy(duration: 0.22)) {
-                vm.notchSize = openNotchSize
+                vm.notchSize = view == .widgets ? islandWidgetsNotchSize : openNotchSize
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .agentMessageSubmitted)) { _ in
+            lastAgentMessageSubmittedAt = Date()
         }
         .onReceive(NotificationCenter.default.publisher(for: .agentChromeStateChanged)) { _ in
             agentChromeRevision &+= 1
@@ -678,12 +682,19 @@ struct ContentView: View {
             hoverTask = Task {
                 try? await Task.sleep(for: .milliseconds(100))
                 guard !Task.isCancelled else { return }
+
+                if let submittedAt = self.lastAgentMessageSubmittedAt {
+                    let remaining = 0.7 - Date().timeIntervalSince(submittedAt)
+                    if remaining > 0 {
+                        try? await Task.sleep(for: .seconds(remaining))
+                        guard !Task.isCancelled else { return }
+                    }
+                }
                 
                 await MainActor.run {
-                    // SwiftUI can briefly emit a false hover transition when
-                    // the focused composer re-renders after pressing Return.
-                    // Verify the real pointer position before collapsing so a
-                    // submitted message never closes the notch by itself.
+                    // Return can briefly make SwiftUI report a false hover exit
+                    // while the focused transcript is replaced. Re-check after a
+                    // short settling interval so sending by itself never closes.
                     guard !self.vm.isMouseHovering() else {
                         self.isHovering = true
                         return

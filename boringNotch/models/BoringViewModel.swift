@@ -195,7 +195,7 @@ class BoringViewModel: NSObject, ObservableObject {
         } else {
             choosePreferredViewForOpen()
         }
-        self.notchSize = openNotchSize
+        self.notchSize = coordinator.currentView == .widgets ? islandWidgetsNotchSize : openNotchSize
         self.notchState = .open
         
         // Force music information update when notch is opened

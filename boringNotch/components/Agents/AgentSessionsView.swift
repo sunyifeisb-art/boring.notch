@@ -566,6 +566,7 @@ struct AgentSessionsView: View {
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else { return }
         draft = ""
+        NotificationCenter.default.post(name: .agentMessageSubmitted, object: nil)
 
         if message == "/history", let target {
             openSession(target)
@@ -709,6 +710,7 @@ private struct AgentConversationTimeline: View {
                                 ForEach(session.messages) { message in
                                     AgentMessageRow(
                                         message: message,
+                                        source: session.source,
                                         isStreaming: message.id == session.messages.last?.id
                                             && message.role == "assistant"
                                             && (session.status == .active || session.status == .inProgress)
@@ -878,7 +880,7 @@ private struct AgentConversationTimeline: View {
     }
 
     private func outlineTitle(for message: AgentMessage, index: Int) -> String {
-        let role = message.role == "user" ? "我" : (message.role == "assistant" ? "Claude" : "提示")
+        let role = message.role == "user" ? "我" : (message.role == "assistant" ? assistantName : "提示")
         let firstLine = message.text
             .components(separatedBy: .newlines)
             .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })?
@@ -887,10 +889,15 @@ private struct AgentConversationTimeline: View {
         let title = firstLine.isEmpty ? "消息 \(index + 1)" : String(firstLine.prefix(32))
         return "\(role)：\(title)"
     }
+
+    private var assistantName: String {
+        session.source.lowercased() == "codex" ? "Codex" : "Claude"
+    }
 }
 
 private struct AgentMessageRow: View, Equatable {
     let message: AgentMessage
+    let source: String
     let isStreaming: Bool
 
     private var isUser: Bool { message.role == "user" }
@@ -911,9 +918,10 @@ private struct AgentMessageRow: View, Equatable {
             .padding(.vertical, 2)
         } else {
             HStack(alignment: .bottom, spacing: 0) {
-                if isUser { Spacer(minLength: 38) }
+                if isUser { Spacer(minLength: 24) }
 
-                VStack(alignment: isUser ? .trailing : .leading, spacing: 2) {
+                AgentBubbleLayout(maximumWidth: isUser ? 520 : 900) {
+                    VStack(alignment: isUser ? .trailing : .leading, spacing: 2) {
                     HStack(spacing: 4) {
                         Text(roleLabel)
                             .font(.system(size: 9, weight: .semibold))
@@ -946,13 +954,13 @@ private struct AgentMessageRow: View, Equatable {
                         )
                         .multilineTextAlignment(isUser ? .trailing : .leading)
                     }
+                    }
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 8)
+                    .background(bubbleColor, in: RoundedRectangle(cornerRadius: 11))
                 }
-                .frame(maxWidth: isUser ? 640 : 900, alignment: isUser ? .trailing : .leading)
-                .padding(.horizontal, 11)
-                .padding(.vertical, 8)
-                .background(bubbleColor, in: RoundedRectangle(cornerRadius: 11))
 
-                if !isUser { Spacer(minLength: 38) }
+                if !isUser { Spacer(minLength: 24) }
             }
             .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
         }
@@ -961,7 +969,7 @@ private struct AgentMessageRow: View, Equatable {
     private var roleLabel: String {
         switch message.role {
         case "user": return "我"
-        case "assistant": return "Claude"
+        case "assistant": return source.lowercased() == "codex" ? "Codex" : "Claude"
         case "error": return "错误"
         default: return message.role.capitalized
         }
@@ -980,6 +988,26 @@ private struct AgentMessageRow: View, Equatable {
         if isUser { return Color.blue.opacity(0.13) }
         if isError { return Color.red.opacity(0.09) }
         return Color.white.opacity(0.055)
+    }
+}
+
+private struct AgentBubbleLayout: Layout {
+    let maximumWidth: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let content = subviews.first else { return .zero }
+        let availableWidth = min(maximumWidth, proposal.width ?? maximumWidth)
+        let idealSize = content.sizeThatFits(.unspecified)
+        let width = min(availableWidth, idealSize.width)
+        return content.sizeThatFits(ProposedViewSize(width: width, height: proposal.height))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let content = subviews.first else { return }
+        content.place(
+            at: bounds.origin,
+            proposal: ProposedViewSize(width: bounds.width, height: bounds.height)
+        )
     }
 }
 
