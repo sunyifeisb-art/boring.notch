@@ -292,6 +292,7 @@ final class AgentBridgeService {
     private let codexDesktopQueue = DispatchQueue(label: "theboringteam.boringnotch.codex-desktop-sync", qos: .utility)
     private var codexDesktopRetryAfter = Date.distantPast
     private var codexDesktopStatusScanOffset = 0
+    private var codexDesktopInterruptedTurnIDs = Set<String>()
     private var lastBackgroundTranscriptRefresh = Date.distantPast
     private var dismissedSessionIDs = Set<String>()
     private var socketServer: AgentUnixSocketServer?
@@ -365,6 +366,13 @@ final class AgentBridgeService {
                                 session.status = .interrupted
                                 session.lastActivity = Date()
                                 self.sessions[identifier] = session
+                                if let turnID = session.turnID {
+                                    self.codexDesktopInterruptedTurnIDs.insert(turnID)
+                                }
+                                if var transcriptState = self.transcriptStates[identifier] {
+                                    transcriptState.codexTaskStatus = .interrupted
+                                    self.transcriptStates[identifier] = transcriptState
+                                }
                             }
                         }
                     }
@@ -596,6 +604,7 @@ final class AgentBridgeService {
 
                 desktopThreads[index]["taskStatus"] = latestTurn["status"] ?? NSNull()
                 desktopThreads[index]["activeTurnID"] = latestTurn["id"] ?? NSNull()
+                desktopThreads[index]["taskCompletedAt"] = latestTurn["completedAt"] ?? NSNull()
             }
             timeout.cancel()
             process.terminate()
@@ -635,6 +644,8 @@ final class AgentBridgeService {
             let previousSize = codexDesktopFileSizes[identifier]
             let fileChanged = previousSize.map { $0 != fileSize } ?? false
             let remoteTurnStatus = record["taskStatus"] as? String
+            let remoteTurnHasNoCompletion = record["taskCompletedAt"] is NSNull
+            let remoteTurnID = record["activeTurnID"] as? String
             if fileChanged, var transcriptState = transcriptStates[identifier] {
                 // A new append after a completed task starts a fresh lifecycle.
                 // Keeping the previous task_complete cached would make the
@@ -652,12 +663,31 @@ final class AgentBridgeService {
             // transcript. Prefer fresh transcript activity in that case; once
             // the appended task_complete/turn_aborted event is parsed below,
             // that transcript event becomes authoritative again.
+            // A live turn in Codex Desktop can appear as `interrupted` to this
+            // separate app-server process. In that case the turn has no
+            // completedAt timestamp; that distinguishes the live, in-memory
+            // turn from a genuinely interrupted turn, which has a completion
+            // timestamp. Codex may go several minutes without writing its log
+            // while waiting for a model response, so file mtime alone is not
+            // enough to keep its state in sync.
+            let remoteTurnWasInterruptedWhenDesktopClosed = remoteTurnID
+                .map(codexDesktopInterruptedTurnIDs.contains) ?? false
+            let remoteTurnIsStillOpen = remoteTurnStatus == "interrupted"
+                && remoteTurnHasNoCompletion
+                && !remoteTurnWasInterruptedWhenDesktopClosed
             let transcriptShowsFreshActivity = fileChanged || transcriptWriteIsFresh
                 || (previousSize == nil && isRecentlyWritten)
+            // The app-server is launched as a separate process from Codex
+            // Desktop. Its thread/turn snapshot can report `interrupted` for a
+            // turn that is still running in the desktop process, especially
+            // while the model is thinking and the transcript has not recently
+            // appended a row. Once we've parsed this transcript's lifecycle,
+            // that state is authoritative until a new append resets it or the
+            // desktop app exits (where we explicitly mark it interrupted).
             let discoveredStatus: BridgeSessionStatus = transcriptShowsFreshActivity
                 ? (transcriptStatus ?? .inProgress)
-                : remoteTurnStatus.flatMap(Self.bridgeStatus(forCodexTurn:))
-                    ?? transcriptStatus
+                : (remoteTurnIsStillOpen ? .inProgress : transcriptStatus)
+                    ?? remoteTurnStatus.flatMap(Self.bridgeStatus(forCodexTurn:))
                     ?? (fileSize == 0 ? .idle : (isRecentlyWritten ? .inProgress : .completed))
 
             var session: BridgeSession
@@ -666,14 +696,18 @@ final class AgentBridgeService {
                 if let title = record["title"] as? String, !title.isEmpty { session.title = title }
                 if let cwd = record["cwd"] as? String, !cwd.isEmpty { session.cwd = cwd }
                 session.resumeID = identifier
-                if let activeTurnID = record["activeTurnID"] as? String {
+                if let activeTurnID = remoteTurnID {
                     session.turnID = activeTurnID
                 } else if fileChanged {
                     session.turnID = nil
                 }
                 if !codexHookSessionIDs.contains(identifier) {
                     session.status = discoveredStatus
-                    session.lastActivity = fileChanged ? Date() : activity
+                    if fileChanged || (existing.status != discoveredStatus && discoveredStatus == .inProgress) {
+                        session.lastActivity = Date()
+                    } else if discoveredStatus != existing.status {
+                        session.lastActivity = activity
+                    }
                 }
                 if transcriptStates[identifier]?.path != path {
                     registerTranscript(path: path, sessionID: identifier, tailWindow: 64 * 1024)
