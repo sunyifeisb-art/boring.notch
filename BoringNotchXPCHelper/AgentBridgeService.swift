@@ -158,6 +158,7 @@ private struct CodexTranscriptEvent: Decodable {
 }
 
 private struct CodexTranscriptEventPayload: Decodable {
+    let type: String?
     let turnID: String?
 
     enum CodingKeys: String, CodingKey {
@@ -218,6 +219,7 @@ private struct TranscriptState {
     var discardLeadingPartial: Bool
     var currentClaudeMessageID: String?
     var currentBridgeMessageID: UUID?
+    var codexTaskStatus: BridgeSessionStatus? = nil
 }
 
 private final class AgentDataCapture: @unchecked Sendable {
@@ -538,7 +540,7 @@ final class AgentBridgeService {
                 if let cwd = record["cwd"] as? String, !cwd.isEmpty { session.cwd = cwd }
                 session.resumeID = identifier
                 if !codexHookSessionIDs.contains(identifier) {
-                    session.status = discoveredStatus
+                    session.status = transcriptStates[identifier]?.codexTaskStatus ?? discoveredStatus
                     session.lastActivity = fileChanged ? Date() : activity
                 }
                 if transcriptStates[identifier]?.path != path {
@@ -581,7 +583,7 @@ final class AgentBridgeService {
         if needsTranscriptSeed { refreshTranscriptStreamsLocked() }
         for pending in pendingStatuses where !codexHookSessionIDs.contains(pending.id) {
             guard var session = sessions[pending.id] else { continue }
-            session.status = pending.status
+            session.status = transcriptStates[pending.id]?.codexTaskStatus ?? pending.status
             session.lastActivity = pending.activity
             if sessions[pending.id] != session { sessions[pending.id] = session }
         }
@@ -2294,6 +2296,7 @@ final class AgentBridgeService {
                 state.discardLeadingPartial = false
                 state.currentClaudeMessageID = nil
                 state.currentBridgeMessageID = nil
+                state.codexTaskStatus = nil
             }
             guard fileSize > state.offset,
                   let handle = FileHandle(forReadingAtPath: state.path)
@@ -2426,9 +2429,26 @@ final class AgentBridgeService {
         if line.range(of: Data("\"type\":\"event_msg\"".utf8)) != nil
             || line.range(of: Data("\"type\": \"event_msg\"".utf8)) != nil
         {
-            if let event = try? transcriptDecoder.decode(CodexTranscriptEvent.self, from: line),
-               let turnID = event.payload?.turnID ?? event.turnID {
-                session.turnID = turnID
+            if let event = try? transcriptDecoder.decode(CodexTranscriptEvent.self, from: line) {
+                if let turnID = event.payload?.turnID ?? event.turnID {
+                    session.turnID = turnID
+                }
+                switch event.payload?.type ?? "" {
+                case "task_started":
+                    session.status = .inProgress
+                    state.codexTaskStatus = .inProgress
+                    session.lastActivity = Date()
+                case "task_complete":
+                    session.status = .completed
+                    state.codexTaskStatus = .completed
+                    session.lastActivity = Date()
+                case "turn_aborted":
+                    session.status = .idle
+                    state.codexTaskStatus = .idle
+                    session.lastActivity = Date()
+                default:
+                    break
+                }
             }
             return
         }
@@ -2452,6 +2472,8 @@ final class AgentBridgeService {
                 trimMessageHistory(&session)
             }
             session.lastUserText = text
+            session.status = .inProgress
+            state.codexTaskStatus = .inProgress
             state.currentClaudeMessageID = nil
             state.currentBridgeMessageID = nil
         } else {
