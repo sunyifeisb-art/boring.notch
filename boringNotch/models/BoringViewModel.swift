@@ -222,7 +222,7 @@ class BoringViewModel: NSObject, ObservableObject {
         let agentEnabled = defaults.object(forKey: "agentIslandEnabled") as? Bool ?? true
         let agentAutoOpen = defaults.object(forKey: "agentIslandAutoOpen") as? Bool ?? true
 
-        if agentEnabled, agentAutoOpen, !AgentSessionManager.shared.agentSessions.isEmpty {
+        if agentEnabled, agentAutoOpen, AgentSessionManager.shared.activeSessionCount > 0 {
             coordinator.currentView = .agents
         } else if !ShelfStateViewModel.shared.isEmpty && Defaults[.openShelfByDefault] {
             coordinator.currentView = .shelf

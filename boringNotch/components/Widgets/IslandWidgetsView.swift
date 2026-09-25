@@ -73,28 +73,33 @@ struct IslandWidgetsView: View {
                 ContentUnavailableView("还没有组件", systemImage: "square.grid.2x2", description: Text("从菜单添加 Agent 状态、快捷控制或 Codex 额度组件。"))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(visibleKinds) { kind in
-                            IslandWidgetCard(kind: kind)
-                            .frame(width: 224, height: 142)
-                            .onDrag { NSItemProvider(object: kind.rawValue as NSString) }
-                            .dropDestination(for: String.self) { values, _ in
-                                guard let moved = values.first.flatMap(IslandWidgetKind.init(rawValue:)),
-                                      moved != kind
-                                else { return false }
-                                reorder(moved, before: kind)
-                                return true
-                            }
-                            .contextMenu {
-                                Button("移除组件", systemImage: "minus.circle") {
-                                    save(visibleKinds.filter { $0 != kind })
-                                }
+                GeometryReader { geometry in
+                    let cardWidth = max(160, (geometry.size.width - 20) / 3)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(spacing: 8) {
+                            ForEach(visibleKinds) { kind in
+                                IslandWidgetCard(kind: kind)
+                                    .frame(width: cardWidth, height: 142)
+                                    .onDrag { NSItemProvider(object: kind.rawValue as NSString) }
+                                    .dropDestination(for: String.self) { values, _ in
+                                        guard let moved = values.first.flatMap(IslandWidgetKind.init(rawValue:)),
+                                              moved != kind
+                                        else { return false }
+                                        reorder(moved, before: kind)
+                                        return true
+                                    }
+                                    .contextMenu {
+                                        Button("移除组件", systemImage: "minus.circle") {
+                                            save(visibleKinds.filter { $0 != kind })
+                                        }
+                                    }
                             }
                         }
+                        .padding(.horizontal, 2)
+                        .padding(.vertical, 2)
                     }
-                    .padding(.horizontal, 2)
-                    .padding(.vertical, 2)
+                    .frame(height: 149)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 .frame(height: 149)
             }
@@ -266,7 +271,13 @@ private struct IslandWidgetCard: View {
     }
 
     private var currentSession: AgentSession? {
-        agentManager.selectedAgentSession ?? activeSessions.first ?? agentManager.agentSessions.first
+        if let selected = agentManager.selectedAgentSession,
+           !selected.status.isTerminal,
+           (selected.status.isRunningOrWaiting || selected.lastActivity >= Date().addingTimeInterval(-24 * 60 * 60))
+        {
+            return selected
+        }
+        return activeSessions.first
     }
 
     var body: some View {

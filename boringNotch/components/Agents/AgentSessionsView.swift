@@ -21,7 +21,25 @@ struct AgentSessionsView: View {
     @FocusState private var composerFocused: Bool
 
     private var displayedSessions: [AgentSession] {
-        showCompleted ? manager.agentSessions : manager.agentSessions.filter { !$0.status.isTerminal }
+        let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
+        let sessions = manager.agentSessions
+        let active = sessions.filter { $0.status.isRunningOrWaiting }
+        let recentIdle = Array(
+            sessions
+                .filter { !$0.status.isTerminal && !$0.status.isRunningOrWaiting && $0.lastActivity >= cutoff }
+                .sorted { $0.lastActivity > $1.lastActivity }
+                .prefix(4)
+        )
+        let recentCompleted = showCompleted
+            ? Array(
+                sessions
+                    .filter { $0.status.isTerminal && $0.lastActivity >= cutoff }
+                    .sorted { $0.lastActivity > $1.lastActivity }
+                    .prefix(6)
+            )
+            : []
+
+        return active + recentIdle + recentCompleted
     }
 
     private var selectedAgentSession: AgentSession? {
@@ -153,7 +171,7 @@ struct AgentSessionsView: View {
             emptyState
         } else {
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
+                LazyHStack(spacing: 8) {
                     ForEach(displayedSessions) { session in
                         AgentSessionCard(
                             session: session,
@@ -222,7 +240,7 @@ struct AgentSessionsView: View {
     private var emptyStateDetail: String {
         if let bridgeError = manager.bridgeError { return bridgeError }
         if let result = manager.hookInstallSummary { return result }
-        return !showCompleted && !manager.agentSessions.isEmpty
+        return !manager.agentSessions.isEmpty
             ? "当前没有进行中的任务，可在下方新建 Claude Code 对话。"
             : "安装并信任 Agent Hooks 后，Claude Code 与 Codex 桌面任务会同步到这里。"
     }

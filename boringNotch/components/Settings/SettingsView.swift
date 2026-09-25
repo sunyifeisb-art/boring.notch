@@ -165,7 +165,7 @@ struct AgentSettings: View {
                     .disabled(!enabled)
                 Toggle("自动选中最近活跃任务", isOn: $autoSelectNewest)
                     .disabled(!enabled)
-                Toggle("在任务列表显示已完成任务", isOn: $showCompleted)
+                Toggle("显示最近 24 小时内的已完成任务", isOn: $showCompleted)
                     .disabled(!enabled)
             }
 
