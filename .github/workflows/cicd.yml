@@ -45,3 +45,22 @@ jobs:
         verbosity: xcpretty
         upload-logs: always
         configuration: release
+
+    - name: Package built app for local verification
+      run: |
+        set -euo pipefail
+        APP_PATH="$(find "$HOME/Library/Developer/Xcode/DerivedData" \
+          -path '*/Build/Products/Release/Boring Notch.app' -type d -print -quit)"
+        if [[ -z "$APP_PATH" ]]; then
+          echo "::error::Boring Notch.app was not found in Xcode's Release products"
+          exit 1
+        fi
+        ditto -c -k --sequesterRsrc --keepParent \
+          "$APP_PATH" "$RUNNER_TEMP/Boring Notch.app.zip"
+
+    - name: Upload built app
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: Boring Notch macOS app
+        path: ${{ runner.temp }}/Boring Notch.app.zip
+        if-no-files-found: error
