@@ -362,13 +362,13 @@ final class AgentBridgeService {
                     } else {
                         self.stopCodexDesktopDiscoveryLocked()
                         for (identifier, var session) in self.sessions where session.source.lowercased() == "codex" {
-                            if session.status == .active || session.status == .inProgress || session.status == .pending {
+                            if let turnID = session.turnID {
+                                self.codexDesktopInterruptedTurnIDs.insert(turnID)
+                            }
+                            if [.active, .inProgress, .pending, .waitingForApproval, .waitingForAnswer].contains(session.status) {
                                 session.status = .interrupted
                                 session.lastActivity = Date()
                                 self.sessions[identifier] = session
-                                if let turnID = session.turnID {
-                                    self.codexDesktopInterruptedTurnIDs.insert(turnID)
-                                }
                                 if var transcriptState = self.transcriptStates[identifier] {
                                     transcriptState.codexTaskStatus = .interrupted
                                     self.transcriptStates[identifier] = transcriptState
