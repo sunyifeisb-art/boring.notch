@@ -36,6 +36,8 @@ struct ContentView: View {
     @State private var agentChromeRevision = 0
     @State private var lastAgentMessageSubmittedAt: Date?
     @State private var isAgentComposerFocused = false
+    @State private var isAgentComposerFocusPending = false
+    @State private var agentComposerFocusGraceTask: Task<Void, Never>?
 
     @State private var gestureProgress: CGFloat = .zero
 
@@ -339,9 +341,26 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .agentComposerFocusChanged)) { notification in
             isAgentComposerFocused = notification.userInfo?["focused"] as? Bool ?? false
             if isAgentComposerFocused {
+                isAgentComposerFocusPending = false
+                agentComposerFocusGraceTask?.cancel()
                 hoverTask?.cancel()
-            } else if vm.notchState == .open, !vm.isMouseHovering() {
+            } else if !isAgentComposerFocusPending,
+                      agentManager.requestedOpenSessionID == nil,
+                      vm.notchState == .open, !vm.isMouseHovering() {
                 scheduleCloseAfterHoverExit()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .agentComposerFocusRequested)) { _ in
+            isAgentComposerFocusPending = true
+            hoverTask?.cancel()
+            agentComposerFocusGraceTask?.cancel()
+            agentComposerFocusGraceTask = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(10))
+                guard !Task.isCancelled else { return }
+                isAgentComposerFocusPending = false
+                if !isAgentComposerFocused && agentManager.requestedOpenSessionID == nil {
+                    scheduleCloseAfterHoverExit()
+                }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .agentChromeStateChanged)) { _ in
@@ -699,7 +718,8 @@ struct ContentView: View {
                 }
                 
                 await MainActor.run {
-                    if self.isAgentComposerFocused {
+                    if self.isAgentComposerFocused || self.isAgentComposerFocusPending
+                        || self.agentManager.requestedOpenSessionID != nil {
                         withAnimation(self.animationSpring) {
                             self.isHovering = false
                         }
@@ -732,6 +752,8 @@ struct ContentView: View {
             try? await Task.sleep(for: .milliseconds(120))
             guard !Task.isCancelled,
                   !isAgentComposerFocused,
+                  !isAgentComposerFocusPending,
+                  agentManager.requestedOpenSessionID == nil,
                   vm.notchState == .open,
                   !vm.isMouseHovering(),
                   !vm.isBatteryPopoverActive,

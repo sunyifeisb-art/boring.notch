@@ -14,7 +14,7 @@ let batterySneakSize: CGSize = .init(width: 160, height: 1)
 
 let shadowPadding: CGFloat = 20
 let openNotchSize: CGSize = .init(width: 640, height: 190)
-let islandWidgetsNotchSize: CGSize = .init(width: openNotchSize.width, height: 315)
+let islandWidgetsNotchSize: CGSize = .init(width: openNotchSize.width, height: 355)
 let agentDetailNotchSize: CGSize = .init(width: 760, height: 360)
 let windowSize: CGSize = .init(
     width: agentDetailNotchSize.width + shadowPadding * 2,

@@ -676,6 +676,22 @@ final class AgentBridgeService {
             let recencyAt = codexDate(record["recencyAt"])
             let createdAt = codexDate(record["createdAt"])
             let activity = updatedAt ?? recencyAt ?? modifiedAt ?? Date()
+            // A persisted task_started row (or an app-server "interrupted"
+            // snapshot without completedAt) is not proof that a days-old turn
+            // is still running. The transcript's last write is independent
+            // evidence; retire stale desktop imports before seeding their tail.
+            if !codexHookSessionIDs.contains(identifier),
+               Date().timeIntervalSince(modifiedAt ?? activity) > 24 * 60 * 60 {
+                if var existing = sessions[identifier],
+                   [.active, .inProgress, .pending, .waitingForApproval, .waitingForAnswer].contains(existing.status) {
+                    existing.status = .interrupted
+                    existing.lastActivity = modifiedAt ?? activity
+                    sessions[identifier] = existing
+                }
+                transcriptStates.removeValue(forKey: identifier)
+                codexDesktopFileSizes[identifier] = fileSize
+                continue
+            }
             let isRecentlyWritten = modifiedAt.map { Date().timeIntervalSince($0) < 30 } ?? false
             let previousSize = codexDesktopFileSizes[identifier]
             let fileChanged = previousSize.map { $0 != fileSize } ?? false
@@ -711,6 +727,7 @@ final class AgentBridgeService {
             let remoteTurnIsStillOpen = remoteTurnStatus == "interrupted"
                 && remoteTurnHasNoCompletion
                 && !remoteTurnWasInterruptedWhenDesktopClosed
+                && Date().timeIntervalSince(modifiedAt ?? activity) < 24 * 60 * 60
             let transcriptShowsFreshActivity = fileChanged || transcriptWriteIsFresh
                 || (previousSize == nil && isRecentlyWritten)
             // The app-server is launched as a separate process from Codex

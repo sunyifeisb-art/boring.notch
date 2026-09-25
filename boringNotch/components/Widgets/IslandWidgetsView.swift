@@ -79,7 +79,7 @@ struct IslandWidgetsView: View {
                         LazyHStack(spacing: 8) {
                             ForEach(visibleKinds) { kind in
                                 IslandWidgetCard(kind: kind)
-                                    .frame(width: cardWidth, height: 142)
+                                    .frame(width: cardWidth, height: 178)
                                     .onDrag { NSItemProvider(object: kind.rawValue as NSString) }
                                     .dropDestination(for: String.self) { values, _ in
                                         guard let moved = values.first.flatMap(IslandWidgetKind.init(rawValue:)),
@@ -96,11 +96,12 @@ struct IslandWidgetsView: View {
                             }
                         }
                         .padding(.horizontal, 2)
-                        .padding(.vertical, 2)
+                        .padding(.top, 2)
+                        .padding(.bottom, 6)
                     }
-                    .frame(height: 149)
+                    .frame(height: 186)
                 }
-                .frame(height: 149)
+                .frame(height: 186)
             }
 
             Text("组件直接显示任务状态并提供操作。应用自带的 WidgetKit 画面不能被其他 App 内嵌；清单用于识别本机扩展并显示兼容情况。")
@@ -110,6 +111,7 @@ struct IslandWidgetsView: View {
         }
         .padding(.horizontal, 8)
         .padding(.top, 1)
+        .padding(.bottom, 12)
         .onAppear {
             if storedKinds == "clock,battery,calendar,agents" {
                 storedKinds = IslandWidgetKind.defaultKinds.map(\.rawValue).joined(separator: ",")

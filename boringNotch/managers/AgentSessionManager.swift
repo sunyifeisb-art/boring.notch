@@ -436,12 +436,16 @@ final class AgentSessionManager: ObservableObject {
     }
 
     func requestOpen(_ session: AgentSession) {
+        NotificationCenter.default.post(name: .agentComposerFocusRequested, object: nil)
         select(session)
         requestedOpenSessionID = session.id
         BoringViewCoordinator.shared.currentView = .agents
     }
 
     func newConversation(cwd: String? = nil, prompt: String? = nil, openInIsland: Bool = false) {
+        if openInIsland {
+            NotificationCenter.default.post(name: .agentComposerFocusRequested, object: nil)
+        }
         let trimmedPrompt = prompt?.trimmingCharacters(in: .whitespacesAndNewlines)
         let message = trimmedPrompt.map { $0.isEmpty ? "/new" : "/new \($0)" } ?? "/new"
         let workingDirectory: String?
@@ -568,6 +572,7 @@ final class AgentSessionManager: ObservableObject {
 extension Notification.Name {
     static let agentMessageSubmitted = Notification.Name("agentMessageSubmitted")
     static let agentComposerFocusChanged = Notification.Name("agentComposerFocusChanged")
+    static let agentComposerFocusRequested = Notification.Name("agentComposerFocusRequested")
     static let agentAttentionNeeded = Notification.Name("agentAttentionNeeded")
     static let agentSessionStarted = Notification.Name("agentSessionStarted")
     static let agentChromeStateChanged = Notification.Name("agentChromeStateChanged")

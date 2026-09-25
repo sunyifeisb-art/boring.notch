@@ -678,6 +678,7 @@ struct AgentSessionsView: View {
 
     private func focusComposer() {
         composerFocusRequest &+= 1
+        NotificationCenter.default.post(name: .agentComposerFocusRequested, object: nil)
         // A FocusState can remain true after another desktop text field takes
         // the key window. A monotonically increasing request forces the native
         // composer to reclaim first-responder status even when that binding did
