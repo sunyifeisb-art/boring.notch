@@ -997,9 +997,11 @@ private struct AgentBubbleLayout: Layout {
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         guard let content = subviews.first else { return .zero }
         let availableWidth = min(maximumWidth, proposal.width ?? maximumWidth)
-        let idealSize = content.sizeThatFits(.unspecified)
-        let width = min(availableWidth, idealSize.width)
-        return content.sizeThatFits(ProposedViewSize(width: width, height: proposal.height))
+        // Measuring a streaming message with an unspecified width makes SwiftUI
+        // shape its entire growing text as one unbounded line on every update.
+        // Constrain the first measurement so long replies wrap immediately and
+        // short messages can still report their natural width.
+        return content.sizeThatFits(ProposedViewSize(width: availableWidth, height: proposal.height))
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
