@@ -533,6 +533,13 @@ final class AgentBridgeService {
             let previousSize = codexDesktopFileSizes[identifier]
             let fileChanged = previousSize.map { $0 != fileSize } ?? false
             let discoveredStatus: BridgeSessionStatus = (isRecentlyWritten || fileChanged) ? .inProgress : .completed
+            if fileChanged, var transcriptState = transcriptStates[identifier] {
+                // A new append after a completed task starts a fresh lifecycle.
+                // Keeping the previous task_complete cached would make the
+                // parser skip the new task_started row and leave turnID stale.
+                transcriptState.codexTaskStatus = nil
+                transcriptStates[identifier] = transcriptState
+            }
 
             var session: BridgeSession
             if let existing = sessions[identifier] {
@@ -540,6 +547,7 @@ final class AgentBridgeService {
                 if let title = record["title"] as? String, !title.isEmpty { session.title = title }
                 if let cwd = record["cwd"] as? String, !cwd.isEmpty { session.cwd = cwd }
                 session.resumeID = identifier
+                if fileChanged { session.turnID = nil }
                 if !codexHookSessionIDs.contains(identifier) {
                     session.status = transcriptStates[identifier]?.codexTaskStatus ?? discoveredStatus
                     session.lastActivity = fileChanged ? Date() : activity
@@ -1143,7 +1151,7 @@ final class AgentBridgeService {
         guard !trimmed.isEmpty else { return nil }
 
         var launchRequest: (id: String, source: String, cwd: String?, resumeID: String?, prompt: String)?
-        var codexRequest: (id: String, cwd: String?, turnID: String?, prompt: String)?
+        var codexRequest: (id: String, cwd: String?, turnID: String?, requiresActiveTurn: Bool, prompt: String)?
         var codexInterruptRequest: (id: String, turnID: String)?
         var terminalRequest: (id: String, commands: [String], interrupt: Bool)?
         let resultID: String? = stateQueue.sync {
@@ -1177,10 +1185,6 @@ final class AgentBridgeService {
                     return existing.id
                 }
                 let isSteerable = existing.status == .active || existing.status == .inProgress
-                guard !isSteerable || existing.turnID != nil else {
-                    appendSystemMessage("当前 Codex 任务状态尚未同步，稍后再试。", to: existing.id, status: existing.status)
-                    return existing.id
-                }
                 codexManagedTurns.insert(existing.id)
                 let userText = trimmed
                 if existing.messages.last?.role != "user" || existing.messages.last?.text != userText {
@@ -1192,7 +1196,13 @@ final class AgentBridgeService {
                     updated.lastActivity = Date()
                     sessions[existing.id] = updated
                 }
-                codexRequest = (existing.id, existing.cwd ?? resolvedCWD, isSteerable ? existing.turnID : nil, userText)
+                codexRequest = (
+                    existing.id,
+                    existing.cwd ?? resolvedCWD,
+                    isSteerable ? existing.turnID : nil,
+                    isSteerable && existing.turnID == nil,
+                    userText
+                )
                 return existing.id
             }
 
@@ -1376,6 +1386,7 @@ final class AgentBridgeService {
                     sessionID: codexRequest.id,
                     cwd: codexRequest.cwd,
                     turnID: codexRequest.turnID,
+                    requiresActiveTurn: codexRequest.requiresActiveTurn,
                     prompt: codexRequest.prompt
                 )
             }
@@ -1563,7 +1574,7 @@ final class AgentBridgeService {
         }
     }
 
-    private func runCodexTurn(sessionID: String, cwd: String?, turnID: String?, prompt: String) {
+    private func runCodexTurn(sessionID: String, cwd: String?, turnID: String?, requiresActiveTurn: Bool, prompt: String) {
         guard let executable = codexExecutableURL() else {
             stateQueue.async { [weak self] in
                 guard let self else { return }
@@ -1664,15 +1675,36 @@ final class AgentBridgeService {
                 throw NSError(domain: "CodexAppServer", code: -2, userInfo: [NSLocalizedDescriptionKey: error["message"] as? String ?? "无法恢复这个 Codex 桌面任务"])
             }
 
+            var resolvedTurnID = turnID
+            if requiresActiveTurn, resolvedTurnID == nil {
+                // Transcript tails can start after task_started in very long
+                // sessions. Ask the app-server for only the newest turn rather
+                // than loading the full conversation into the helper.
+                let latestTurnPage = try request("thread/turns/list", params: [
+                    "threadId": sessionID,
+                    "limit": 1,
+                    "sortDirection": "desc",
+                    "itemsView": "summary"
+                ])
+                let turns = (latestTurnPage["result"] as? [String: Any])?["data"] as? [[String: Any]] ?? []
+                if let latestTurn = turns.first,
+                   latestTurn["status"] as? String == "inProgress",
+                   let latestTurnID = latestTurn["id"] as? String {
+                    resolvedTurnID = latestTurnID
+                } else {
+                    throw NSError(domain: "CodexAppServer", code: -4, userInfo: [NSLocalizedDescriptionKey: "Codex 任务状态已变化，未能确认可继续的任务；请刷新任务后重试。"])
+                }
+            }
+
             var turnParams: [String: Any] = [
                 "threadId": sessionID,
                 "input": [["type": "text", "text": prompt, "text_elements": []]]
             ]
             if let cwd { turnParams["cwd"] = cwd }
             let method: String
-            if let turnID {
+            if let resolvedTurnID {
                 method = "turn/steer"
-                turnParams["expectedTurnId"] = turnID
+                turnParams["expectedTurnId"] = resolvedTurnID
             } else {
                 method = "turn/start"
                 turnParams["approvalPolicy"] = "never"
@@ -2290,7 +2322,8 @@ final class AgentBridgeService {
             let isActivelyUpdating = [BridgeSessionStatus.active, .inProgress, .pending, .waitingForApproval, .waitingForAnswer]
                 .contains(session.status)
             let isFinishing = Date().timeIntervalSince(session.lastActivity) < 3
-            guard isActivelyUpdating || isFinishing else {
+            let isRequestedCodexRefresh = requestedSessionID == sessionID && session.source.lowercased() == "codex"
+            guard isActivelyUpdating || isFinishing || isRequestedCodexRefresh else {
                 state.remainder.removeAll(keepingCapacity: false)
                 transcriptStates[sessionID] = state
                 continue
