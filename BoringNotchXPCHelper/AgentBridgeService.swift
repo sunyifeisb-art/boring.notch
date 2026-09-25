@@ -1012,8 +1012,8 @@ final class AgentBridgeService {
                 && !session.isManaged
                 && !codexHookSessionIDs.contains(identifier)
                 && [.active, .inProgress, .pending, .waitingForApproval, .waitingForAnswer].contains(session.status) {
-                let lastWrite = transcriptStates[identifier]?.path.flatMap {
-                    (try? FileManager.default.attributesOfItem(atPath: $0))?[.modificationDate] as? Date
+                let lastWrite = (transcriptStates[identifier]?.path).flatMap { path in
+                    (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
                 }
                 guard now.timeIntervalSince(lastWrite ?? session.lastActivity) > 24 * 60 * 60 else { continue }
                 session.status = .interrupted
