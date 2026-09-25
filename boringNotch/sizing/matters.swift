@@ -14,11 +14,11 @@ let batterySneakSize: CGSize = .init(width: 160, height: 1)
 
 let shadowPadding: CGFloat = 20
 let openNotchSize: CGSize = .init(width: 640, height: 190)
-let islandWidgetsNotchSize: CGSize = .init(width: openNotchSize.width, height: 355)
+let islandWidgetsNotchSize: CGSize = .init(width: openNotchSize.width, height: 430)
 let agentDetailNotchSize: CGSize = .init(width: 760, height: 360)
 let windowSize: CGSize = .init(
     width: agentDetailNotchSize.width + shadowPadding * 2,
-    height: agentDetailNotchSize.height + shadowPadding
+    height: max(agentDetailNotchSize.height, islandWidgetsNotchSize.height) + shadowPadding
 )
 let cornerRadiusInsets: (opened: (top: CGFloat, bottom: CGFloat), closed: (top: CGFloat, bottom: CGFloat)) = (opened: (top: 19, bottom: 24), closed: (top: 6, bottom: 14))
 
