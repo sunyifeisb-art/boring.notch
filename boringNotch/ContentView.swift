@@ -317,6 +317,30 @@ struct ContentView: View {
             bluetoothAccessoryMonitor.start()
             airDropTransferMonitor.start()
         }
+        .task(id: vm.notchState == .open) {
+            guard vm.notchState == .open else { return }
+            // SwiftUI can miss a hover-exit event when a focused text field or
+            // the transcript replaces its view. Reconcile against the cursor
+            // while open so a stale hover state cannot pin the island open.
+            try? await Task.sleep(for: .milliseconds(500))
+            var outsideSince: Date?
+            while !Task.isCancelled && vm.notchState == .open {
+                if vm.isMouseHovering() || vm.isBatteryPopoverActive
+                    || SharingStateManager.shared.preventNotchClose {
+                    outsideSince = nil
+                } else if let outsideSince {
+                    if Date().timeIntervalSince(outsideSince) >= 0.25 {
+                        hoverTask?.cancel()
+                        isHovering = false
+                        vm.close()
+                        return
+                    }
+                } else {
+                    outsideSince = Date()
+                }
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+        }
         .overlay(alignment: .top) {
             if bluetoothAccessoryMonitor.isVisible && vm.notchState == .closed {
                 BluetoothAccessoryHUD(
@@ -332,7 +356,7 @@ struct ContentView: View {
         .onChange(of: coordinator.currentView) { _, view in
             guard vm.notchState == .open, view != .agents else { return }
             withAnimation(.snappy(duration: 0.22)) {
-                vm.notchSize = view == .widgets ? islandWidgetsNotchSize : openNotchSize
+                vm.notchSize = openNotchSize
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .agentMessageSubmitted)) { _ in
@@ -510,8 +534,6 @@ struct ContentView: View {
                         ShelfView()
                     case .agents:
                         AgentSessionsView()
-                    case .widgets:
-                        IslandWidgetsView()
                     }
                 }
                 // The container resizes as the view opens. Scaling the whole

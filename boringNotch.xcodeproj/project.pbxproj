@@ -10,11 +10,8 @@
 		A16E00012F10000100A61E01 /* AgentSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A16E00112F10000100A61E01 /* AgentSession.swift */; };
 		A16E00022F10000100A61E01 /* AgentSessionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A16E00122F10000100A61E01 /* AgentSessionManager.swift */; };
 		A16E00032F10000100A61E01 /* AgentSessionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A16E00132F10000100A61E01 /* AgentSessionsView.swift */; };
-		D44A0010C0DE000000000002 /* IslandWidgetsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A0010C0DE000000000001 /* IslandWidgetsView.swift */; };
-		D44A0010C0DE000000000004 /* WidgetCatalogService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A0010C0DE000000000005 /* WidgetCatalogService.swift */; };
 		D44A0010C0DE000000000006 /* BluetoothAccessoryMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A0010C0DE000000000007 /* BluetoothAccessoryMonitor.swift */; };
 		D44A0010C0DE000000000008 /* AirDropTransferMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A0010C0DE000000000009 /* AirDropTransferMonitor.swift */; };
-		D44A0010C0DE000000000010 /* ShortcutActionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A0010C0DE000000000011 /* ShortcutActionService.swift */; };
 		1100290C2E847E2800035A57 /* NSItemProvider+LoadHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1100290B2E847E2800035A57 /* NSItemProvider+LoadHelpers.swift */; };
 		110029272E84FD4C00035A57 /* TemporaryFileStorageService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110029262E84FD4C00035A57 /* TemporaryFileStorageService.swift */; };
 		1100292A2E8691B400035A57 /* FileShareView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110029292E8691B400035A57 /* FileShareView.swift */; };
@@ -193,11 +190,8 @@
 		A16E00112F10000100A61E01 /* AgentSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSession.swift; sourceTree = "<group>"; };
 		A16E00122F10000100A61E01 /* AgentSessionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSessionManager.swift; sourceTree = "<group>"; };
 		A16E00132F10000100A61E01 /* AgentSessionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSessionsView.swift; sourceTree = "<group>"; };
-		D44A0010C0DE000000000001 /* IslandWidgetsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IslandWidgetsView.swift; sourceTree = "<group>"; };
-		D44A0010C0DE000000000005 /* WidgetCatalogService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetCatalogService.swift; sourceTree = "<group>"; };
 		D44A0010C0DE000000000007 /* BluetoothAccessoryMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BluetoothAccessoryMonitor.swift; sourceTree = "<group>"; };
 		D44A0010C0DE000000000009 /* AirDropTransferMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirDropTransferMonitor.swift; sourceTree = "<group>"; };
-		D44A0010C0DE000000000011 /* ShortcutActionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutActionService.swift; sourceTree = "<group>"; };
 		1100290B2E847E2800035A57 /* NSItemProvider+LoadHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NSItemProvider+LoadHelpers.swift"; sourceTree = "<group>"; };
 		110029262E84FD4C00035A57 /* TemporaryFileStorageService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TemporaryFileStorageService.swift; sourceTree = "<group>"; };
 		110029292E8691B400035A57 /* FileShareView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileShareView.swift; sourceTree = "<group>"; };
@@ -504,7 +498,6 @@
 		1471639B2C5D362F0068B555 /* components */ = {
 			isa = PBXGroup;
 			children = (
-				D44A0010C0DE000000000003 /* Widgets */,
 				A16E00202F10000100A61E01 /* Agents */,
 				B141C23B2CA5F50900AC8CC8 /* Onboarding */,
 				B1C448992C97375A001F0858 /* Tips */,
@@ -525,16 +518,6 @@
 				B1F747F82EC7E94000F841DB /* LottieView.swift */,
 			);
 			path = components;
-			sourceTree = "<group>";
-		};
-		D44A0010C0DE000000000003 /* Widgets */ = {
-			isa = PBXGroup;
-			children = (
-				D44A0010C0DE000000000001 /* IslandWidgetsView.swift */,
-				D44A0010C0DE000000000005 /* WidgetCatalogService.swift */,
-				D44A0010C0DE000000000011 /* ShortcutActionService.swift */,
-			);
-			path = Widgets;
 			sourceTree = "<group>";
 		};
 		147163B52C5D804B0068B555 /* managers */ = {
@@ -950,9 +933,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				D44A0010C0DE000000000002 /* IslandWidgetsView.swift in Sources */,
-				D44A0010C0DE000000000004 /* WidgetCatalogService.swift in Sources */,
-				D44A0010C0DE000000000010 /* ShortcutActionService.swift in Sources */,
 				A16E00012F10000100A61E01 /* AgentSession.swift in Sources */,
 				A16E00022F10000100A61E01 /* AgentSessionManager.swift in Sources */,
 				A16E00032F10000100A61E01 /* AgentSessionsView.swift in Sources */,
@@ -1095,7 +1075,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 281;
+				CURRENT_PROJECT_VERSION = 282;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = BoringNotchXPCHelper/Info.plist;
@@ -1120,7 +1100,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 281;
+				CURRENT_PROJECT_VERSION = 282;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = BoringNotchXPCHelper/Info.plist;
@@ -1274,7 +1254,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 281;
+				CURRENT_PROJECT_VERSION = 282;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_ASSET_PATHS = "\"boringNotch/Preview Content\"";
 				DEVELOPMENT_TEAM = "";
@@ -1330,7 +1310,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 281;
+				CURRENT_PROJECT_VERSION = 282;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_ASSET_PATHS = "\"boringNotch/Preview Content\"";
 				DEVELOPMENT_TEAM = "";

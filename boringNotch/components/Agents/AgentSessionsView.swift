@@ -143,10 +143,6 @@ struct AgentSessionsView: View {
                 object: nil,
                 userInfo: ["focused": false]
             )
-            guard vm.notchState == .open else { return }
-            withAnimation(.snappy(duration: 0.22)) {
-                vm.notchSize = openNotchSize
-            }
         }
         .alert(
             manager.workspaceAccessError == nil ? "无法打开 Claude Code" : "工作目录授权",

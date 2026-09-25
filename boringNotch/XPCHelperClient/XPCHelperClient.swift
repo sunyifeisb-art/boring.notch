@@ -291,43 +291,6 @@ final class XPCHelperClient: NSObject {
         }
     }
 
-    nonisolated func widgetCatalogJSON() async -> Data {
-        do {
-            let service = await MainActor.run { ensureRemoteService() }
-            let result: NSData = try await service.withContinuation { service, continuation in
-                service.widgetCatalogJSON { data in continuation.resume(returning: data) }
-            }
-            return result as Data
-        } catch {
-            return Data("[]".utf8)
-        }
-    }
-
-    nonisolated func shortcutNamesJSON() async -> Data {
-        do {
-            let service = await MainActor.run { ensureRemoteService() }
-            let result: NSData = try await service.withContinuation { service, continuation in
-                service.shortcutNamesJSON { data in continuation.resume(returning: data) }
-            }
-            return result as Data
-        } catch {
-            return Data("[]".utf8)
-        }
-    }
-
-    nonisolated func runShortcut(_ name: String) async -> Data {
-        do {
-            let service = await MainActor.run { ensureRemoteService() }
-            let result: NSData = try await service.withContinuation { service, continuation in
-                service.runShortcut(name) { data in continuation.resume(returning: data) }
-            }
-            return result as Data
-        } catch {
-            return (try? JSONEncoder().encode(ShortcutActionExecution(output: nil, error: error.localizedDescription)))
-                ?? Data("{}".utf8)
-        }
-    }
-
     nonisolated func respondToAgent(sessionID: String, responseJSON: Data) async -> Bool {
         do {
             let service = await MainActor.run { ensureRemoteService() }

@@ -28,7 +28,6 @@ public enum NotchViews: Equatable {
     case home
     case shelf
     case agents
-    case widgets
 }
 
 enum SettingsEnum {
