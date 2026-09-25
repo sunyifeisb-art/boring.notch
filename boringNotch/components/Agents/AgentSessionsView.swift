@@ -15,6 +15,7 @@ struct AgentSessionsView: View {
     @State private var detailSessionID: String?
     @State private var showsDirectoryPicker = false
     @State private var isDroppingFileContext = false
+    @State private var composerWindow: NSWindow?
     @AppStorage("agentIslandShowCompleted") private var showCompleted = true
     @FocusState private var composerFocused: Bool
 
@@ -45,20 +46,24 @@ struct AgentSessionsView: View {
         Group {
             if let detailSession {
                 taskDetail(session: detailSession)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                    // Sliding a fully populated transcript while the notch is also
+                    // resizing briefly composites two differently wrapped layouts.
+                    // A short fade avoids that overlap during entry/exit.
+                    .transition(.opacity)
             } else {
                 taskList
-                    .transition(.move(edge: .leading).combined(with: .opacity))
+                    .transition(.opacity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .animation(.snappy(duration: 0.2), value: detailSessionID)
+        .animation(.easeOut(duration: 0.14), value: detailSessionID)
         .fileImporter(
             isPresented: $showsDirectoryPicker,
             allowedContentTypes: [.folder],
             allowsMultipleSelection: false
         ) { result in
             guard case .success(let urls) = result, let directory = urls.first else { return }
+            guard manager.setDefaultWorkingDirectory(directory) else { return }
             manager.newConversation(cwd: directory.path)
             focusComposer()
         }
@@ -88,17 +93,23 @@ struct AgentSessionsView: View {
             }
         }
         .alert(
-            "无法打开 Claude Code",
+            manager.workspaceAccessError == nil ? "无法打开 Claude Code" : "工作目录授权",
             isPresented: Binding(
-                get: { manager.terminalOpenError != nil },
+                get: { manager.terminalOpenError != nil || manager.workspaceAccessError != nil },
                 set: { isPresented in
-                    if !isPresented { manager.dismissTerminalOpenError() }
+                    if !isPresented {
+                        manager.dismissTerminalOpenError()
+                        manager.workspaceAccessError = nil
+                    }
                 }
             )
         ) {
-            Button("好") { manager.dismissTerminalOpenError() }
+            Button("好") {
+                manager.dismissTerminalOpenError()
+                manager.workspaceAccessError = nil
+            }
         } message: {
-            Text(manager.terminalOpenError ?? "")
+            Text(manager.workspaceAccessError ?? manager.terminalOpenError ?? "")
         }
     }
 
@@ -131,7 +142,7 @@ struct AgentSessionsView: View {
                     }
 
                     NewClaudeTaskButton {
-                        manager.newConversation()
+                        startNewConversation()
                         focusComposer()
                     }
                 }
@@ -419,10 +430,9 @@ struct AgentSessionsView: View {
         return HStack(spacing: 6) {
             Menu {
                 Button("新建 Claude 对话") {
-                    manager.newConversation()
-                    detailSessionID = nil
+                    startNewConversation()
                 }
-                Button("在文件夹中新建 Claude 对话…") { showsDirectoryPicker = true }
+                Button("设置默认工作目录（授权一次）…") { showsDirectoryPicker = true }
 
                 if target != nil {
                     Divider()
@@ -508,6 +518,14 @@ struct AgentSessionsView: View {
                 .textFieldStyle(.plain)
                 .font(.system(size: showsTarget ? 11 : 12.5))
                 .focused($composerFocused)
+                .background(AgentComposerWindowReader { window in
+                    if composerWindow !== window {
+                        composerWindow = window
+                        if composerFocused, let panel = window as? BoringNotchSkyLightWindow {
+                            panel.makeKey()
+                        }
+                    }
+                })
                 .simultaneousGesture(
                     TapGesture().onEnded {
                         focusComposer()
@@ -569,7 +587,7 @@ struct AgentSessionsView: View {
         if let target {
             manager.sendMessage(command, to: target.id)
         } else if command == "/new" {
-            manager.newConversation()
+            startNewConversation()
         }
         focusComposer()
     }
@@ -578,6 +596,15 @@ struct AgentSessionsView: View {
         detailSessionID = session.id
         manager.select(session)
         focusComposer()
+    }
+
+    private func startNewConversation() {
+        detailSessionID = nil
+        if manager.hasDefaultWorkingDirectory {
+            manager.newConversation()
+        } else {
+            showsDirectoryPicker = true
+        }
     }
 
     private func openCodexDesktop(_ session: AgentSession) {
@@ -593,12 +620,12 @@ struct AgentSessionsView: View {
         // `nonactivatingPanel` intentionally keeps the user's current app
         // active. Explicitly making the visible notch panel key gives its
         // TextField first-responder status without switching applications.
-        if let panel = NSApp.windows.first(where: {
-            $0 is BoringNotchSkyLightWindow && $0.isVisible
-        }) {
+        if let panel = composerWindow as? BoringNotchSkyLightWindow, panel.isVisible {
             panel.makeKey()
         }
-        composerFocused = true
+        DispatchQueue.main.async {
+            composerFocused = true
+        }
     }
 
     private func updateNotchSize(hasDetail: Bool) {
@@ -662,6 +689,7 @@ private struct AgentConversationTimeline: View {
 
     @State private var isOutlineExpanded = false
     @State private var activeMessageID: UUID?
+    @State private var trackedMessageID: UUID?
     @State private var isFollowingLatest = true
 
     var body: some View {
@@ -675,52 +703,40 @@ private struct AgentConversationTimeline: View {
                 .font(.system(size: 12))
             } else {
                 ScrollViewReader { proxy in
-                    GeometryReader { viewport in
-                        ZStack(alignment: .trailing) {
-                            ScrollView(.vertical, showsIndicators: false) {
-                                LazyVStack(spacing: 9) {
-                                    ForEach(session.messages) { message in
-                                        AgentMessageRow(
-                                            message: message,
-                                            isStreaming: message.id == session.messages.last?.id
-                                                && message.role == "assistant"
-                                                && (session.status == .active || session.status == .inProgress)
-                                        )
-                                        .equatable()
-                                        .background {
-                                            GeometryReader { geometry in
-                                                Color.clear.preference(
-                                                    key: AgentMessageFramePreferenceKey.self,
-                                                    value: [message.id: geometry.frame(in: .named("agentConversationViewport"))]
-                                                )
-                                            }
-                                        }
-                                        .id(message.id)
-                                    }
+                    ZStack(alignment: .trailing) {
+                        ScrollView(.vertical, showsIndicators: false) {
+                            LazyVStack(spacing: 9) {
+                                ForEach(session.messages) { message in
+                                    AgentMessageRow(
+                                        message: message,
+                                        isStreaming: message.id == session.messages.last?.id
+                                            && message.role == "assistant"
+                                            && (session.status == .active || session.status == .inProgress)
+                                    )
+                                    .equatable()
+                                    .id(message.id)
                                 }
-                                .padding(.leading, 2)
-                                .padding(.trailing, 17)
-                                .padding(.vertical, 1)
                             }
-                            .coordinateSpace(name: "agentConversationViewport")
-                            .onPreferenceChange(AgentMessageFramePreferenceKey.self) { frames in
-                                updateScrollPosition(frames, viewportHeight: viewport.size.height)
-                            }
-
-                            conversationOutline(using: proxy)
+                            .padding(.leading, 2)
+                            .padding(.trailing, 17)
+                            .padding(.vertical, 1)
+                            .scrollTargetLayout()
                         }
+                        .scrollPosition(id: $trackedMessageID, anchor: .bottom)
+                        .defaultScrollAnchor(.bottom)
+                        .onChange(of: trackedMessageID) { _, identifier in
+                            activeMessageID = identifier
+                            isFollowingLatest = identifier == session.messages.last?.id
+                        }
+
+                        conversationOutline(using: proxy)
                     }
                     .onAppear {
-                        scrollToLatest(session: session, using: proxy, animated: false)
+                        trackedMessageID = session.messages.last?.id
                     }
                     .onChange(of: session.messages.count) { _, _ in
                         if isFollowingLatest || session.messages.last?.role == "user" {
-                            scrollToLatest(session: session, using: proxy, animated: true)
-                        }
-                    }
-                    .onChange(of: session.messages.last?.text) { _, _ in
-                        if isFollowingLatest {
-                            scrollToLatest(session: session, using: proxy, animated: true)
+                            trackedMessageID = session.messages.last?.id
                         }
                     }
                 }
@@ -861,23 +877,6 @@ private struct AgentConversationTimeline: View {
         return 9 + CGFloat(index) / CGFloat(count - 1) * max(0, height - 18)
     }
 
-    private func updateScrollPosition(_ frames: [UUID: CGRect], viewportHeight: CGFloat) {
-        guard !frames.isEmpty else { return }
-        let visibleFrames = frames.filter { $0.value.maxY > 0 && $0.value.minY < viewportHeight }
-        if let current = visibleFrames.min(by: { lhs, rhs in
-            let lhsDistance = lhs.value.minY >= 0 ? lhs.value.minY : abs(lhs.value.maxY)
-            let rhsDistance = rhs.value.minY >= 0 ? rhs.value.minY : abs(rhs.value.maxY)
-            return lhsDistance < rhsDistance
-        }) {
-            activeMessageID = current.key
-        }
-        if let lastID = session.messages.last?.id, let lastFrame = frames[lastID] {
-            isFollowingLatest = lastFrame.maxY <= viewportHeight + 48
-        } else {
-            isFollowingLatest = false
-        }
-    }
-
     private func outlineTitle(for message: AgentMessage, index: Int) -> String {
         let role = message.role == "user" ? "我" : (message.role == "assistant" ? "Claude" : "提示")
         let firstLine = message.text
@@ -887,14 +886,6 @@ private struct AgentConversationTimeline: View {
             .trimmingCharacters(in: CharacterSet(charactersIn: "#*- `>")) ?? ""
         let title = firstLine.isEmpty ? "消息 \(index + 1)" : String(firstLine.prefix(32))
         return "\(role)：\(title)"
-    }
-}
-
-private struct AgentMessageFramePreferenceKey: PreferenceKey {
-    static var defaultValue: [UUID: CGRect] = [:]
-
-    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
     }
 }
 
@@ -937,12 +928,26 @@ private struct AgentMessageRow: View, Equatable {
                         }
                     }
 
-                    AgentMarkdownContent(
-                        text: message.text.isEmpty ? "…" : message.text,
-                        isError: isError,
-                        messageID: message.id
-                    )
+                    if isStreaming {
+                        // Keep live output responsive: parsing Markdown, formulas,
+                        // tables and code blocks against the entire growing reply
+                        // on every stream update caused expensive repeated layout.
+                        Text(message.text.isEmpty ? "…" : message.text)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(isError ? Color.red : Color.primary)
+                            .lineSpacing(1.5)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        AgentMarkdownContent(
+                            text: message.text.isEmpty ? "…" : message.text,
+                            isError: isError,
+                            messageID: message.id
+                        )
+                        .multilineTextAlignment(isUser ? .trailing : .leading)
+                    }
                 }
+                .frame(maxWidth: isUser ? 640 : 900, alignment: isUser ? .trailing : .leading)
                 .padding(.horizontal, 11)
                 .padding(.vertical, 8)
                 .background(bubbleColor, in: RoundedRectangle(cornerRadius: 11))
@@ -983,8 +988,8 @@ private struct AgentMarkdownContent: View, Equatable {
     let isError: Bool
     let messageID: UUID
 
-    private struct Block: Identifiable {
-        enum Kind {
+    private struct Block: Identifiable, Sendable {
+        enum Kind: Sendable {
             case paragraph
             case heading(level: Int)
             case bullet
@@ -1001,7 +1006,30 @@ private struct AgentMarkdownContent: View, Equatable {
         let content: String
     }
 
-    private var blocks: [Block] {
+    private let parsedBlocks: [Block]?
+
+    init(text: String, isError: Bool, messageID: UUID) {
+        self.text = text
+        self.isError = isError
+        self.messageID = messageID
+
+        // Keep the rich renderer bounded. Replacing a plain-text placeholder
+        // with hundreds of asynchronously-created rows changed lazy-list row
+        // heights after scrolling had begun, which could leave stale/overlapped
+        // content visible when opening long conversations.
+        let newlineCount = text.utf8.filter { $0 == 0x0A }.prefix(201).count
+        if text.utf8.count <= 20_000, newlineCount <= 200 {
+            parsedBlocks = Self.parseBlocks(text)
+        } else {
+            parsedBlocks = nil
+        }
+    }
+
+    static func == (lhs: AgentMarkdownContent, rhs: AgentMarkdownContent) -> Bool {
+        lhs.text == rhs.text && lhs.isError == rhs.isError && lhs.messageID == rhs.messageID
+    }
+
+    nonisolated private static func parseBlocks(_ text: String) -> [Block] {
         var result: [Block] = []
         var lines: [String] = []
         var codeLanguage: String?
@@ -1104,59 +1132,75 @@ private struct AgentMarkdownContent: View, Equatable {
     }
 
     var body: some View {
-        LazyVStack(alignment: .leading, spacing: 5) {
-            ForEach(blocks) { block in
-                Group {
-                switch block.kind {
-                case .paragraph:
-                    AgentInlineMarkdown(source: block.content, fontSize: 12.5, color: isError ? .red : .primary)
-                        .lineSpacing(1.5)
-                case .heading(let level):
-                    AgentInlineMarkdown(
-                        source: block.content,
-                        fontSize: headingSize(level),
-                        color: isError ? .red : .primary,
-                        weight: .bold
-                    )
-                case .bullet:
-                    listRow(marker: "•", content: block.content)
-                case .numbered(let marker):
-                    listRow(marker: marker, content: block.content)
-                case .quote:
-                    HStack(alignment: .top, spacing: 6) {
-                        Capsule()
-                            .fill(Color.white.opacity(0.24))
-                            .frame(width: 2)
-                        AgentInlineMarkdown(
-                            source: block.content,
-                            fontSize: 12,
-                            color: isError ? .red : .secondary,
-                            italic: true
-                        )
+        Group {
+            if let parsedBlocks {
+                // The outer conversation list already virtualizes whole messages.
+                // A nested lazy stack estimates rich row heights and can overlap
+                // content while a long transcript settles.
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(parsedBlocks) { block in
+                        Group {
+                            switch block.kind {
+                            case .paragraph:
+                                AgentInlineMarkdown(source: block.content, fontSize: 12.5, color: isError ? .red : .primary)
+                                    .lineSpacing(1.5)
+                            case .heading(let level):
+                                AgentInlineMarkdown(
+                                    source: block.content,
+                                    fontSize: headingSize(level),
+                                    color: isError ? .red : .primary,
+                                    weight: .bold
+                                )
+                            case .bullet:
+                                listRow(marker: "•", content: block.content)
+                            case .numbered(let marker):
+                                listRow(marker: marker, content: block.content)
+                            case .quote:
+                                HStack(alignment: .top, spacing: 6) {
+                                    Capsule()
+                                        .fill(Color.white.opacity(0.24))
+                                        .frame(width: 2)
+                                    AgentInlineMarkdown(
+                                        source: block.content,
+                                        fontSize: 12,
+                                        color: isError ? .red : .secondary,
+                                        italic: true
+                                    )
+                                }
+                            case .divider:
+                                Divider().opacity(0.25)
+                            case .math:
+                                Math(block.content)
+                                    .mathFont(Math.Font(name: .latinModern, size: 16))
+                                    .mathTypesettingStyle(.display)
+                                    .foregroundStyle(isError ? Color.red : Color.primary)
+                                    .frame(maxWidth: .infinity, alignment: .center)
+                                    .padding(.vertical, 5)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            case .code(let language):
+                                codeBlock(block.content, language: language)
+                            case .table(let headers, let rows):
+                                markdownTable(headers: headers, rows: rows)
+                            }
+                        }
+                        .id("\(messageID.uuidString)-block-\(block.id)")
                     }
-                case .divider:
-                    Divider().opacity(0.25)
-                case .math:
-                    Math(block.content)
-                        .mathFont(Math.Font(name: .latinModern, size: 16))
-                        .mathTypesettingStyle(.display)
-                        .foregroundStyle(isError ? Color.red : Color.primary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.vertical, 5)
-                        .fixedSize(horizontal: false, vertical: true)
-                case .code(let language):
-                    codeBlock(block.content, language: language)
-                case .table(let headers, let rows):
-                    markdownTable(headers: headers, rows: rows)
                 }
-                }
-                .id("\(messageID.uuidString)-block-\(block.id)")
+            } else {
+                // Large transcripts use one text view instead of thousands of
+                // Markdown subviews. This keeps the lazy timeline's row geometry
+                // stable and bounds layout work when entering an older task.
+                Text(text)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(isError ? Color.red : Color.primary)
+                    .lineSpacing(1.5)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .textSelection(.enabled)
     }
 
-    private func heading(from line: String) -> (level: Int, text: String)? {
+    nonisolated private static func heading(from line: String) -> (level: Int, text: String)? {
         let marker = line.prefix { $0 == "#" }
         guard !marker.isEmpty, marker.count <= 6 else { return nil }
         let remainder = line.dropFirst(marker.count)
@@ -1164,14 +1208,14 @@ private struct AgentMarkdownContent: View, Equatable {
         return (marker.count, remainder.trimmingCharacters(in: .whitespaces))
     }
 
-    private func bulletText(from line: String) -> String? {
+    nonisolated private static func bulletText(from line: String) -> String? {
         for prefix in ["- ", "* ", "+ "] where line.hasPrefix(prefix) {
             return String(line.dropFirst(prefix.count))
         }
         return nil
     }
 
-    private func numberedText(from line: String) -> (marker: String, text: String)? {
+    nonisolated private static func numberedText(from line: String) -> (marker: String, text: String)? {
         guard let dot = line.firstIndex(of: ".") else { return nil }
         let number = line[..<dot]
         guard !number.isEmpty, number.allSatisfy(\.isNumber) else { return nil }
@@ -1189,7 +1233,7 @@ private struct AgentMarkdownContent: View, Equatable {
         }
     }
 
-    private func tableCells(from line: String) -> [String]? {
+    nonisolated private static func tableCells(from line: String) -> [String]? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         guard trimmed.contains("|") else { return nil }
         let content = trimmed
@@ -1200,7 +1244,7 @@ private struct AgentMarkdownContent: View, Equatable {
         return cells.count >= 2 ? cells : nil
     }
 
-    private func isTableSeparator(_ line: String, columnCount: Int) -> Bool {
+    nonisolated private static func isTableSeparator(_ line: String, columnCount: Int) -> Bool {
         guard let cells = tableCells(from: line), cells.count == columnCount else { return false }
         return cells.allSatisfy { cell in
             let marker = cell.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
@@ -1734,5 +1778,40 @@ struct AgentLiveActivity: View {
             .frame(width: 74, alignment: .trailing)
         }
         .frame(height: vm.effectiveClosedNotchHeight)
+    }
+}
+
+private struct AgentComposerWindowReader: NSViewRepresentable {
+    let onResolve: (NSWindow?) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onResolve: onResolve) }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        view.isHidden = true
+        context.coordinator.resolve(from: view)
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.resolve(from: view)
+    }
+
+    final class Coordinator {
+        private let onResolve: (NSWindow?) -> Void
+        private weak var resolvedWindow: NSWindow?
+
+        init(onResolve: @escaping (NSWindow?) -> Void) {
+            self.onResolve = onResolve
+        }
+
+        func resolve(from view: NSView) {
+            DispatchQueue.main.async { [weak self, weak view] in
+                guard let self, let view, let window = view.window,
+                      self.resolvedWindow !== window else { return }
+                self.resolvedWindow = window
+                self.onResolve(window)
+            }
+        }
     }
 }

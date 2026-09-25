@@ -25,6 +25,8 @@ struct ContentView: View {
     @ObservedObject var batteryModel = BatteryStatusViewModel.shared
     @ObservedObject var brightnessManager = BrightnessManager.shared
     @ObservedObject var volumeManager = VolumeManager.shared
+    @ObservedObject var bluetoothAccessoryMonitor = BluetoothAccessoryMonitor.shared
+    @ObservedObject var airDropTransferMonitor = AirDropTransferMonitor.shared
     private let agentManager = AgentSessionManager.shared
     @AppStorage("agentIslandEnabled") private var agentIslandEnabled = true
     @AppStorage("agentIslandShowNotifications") private var agentIslandShowNotifications = true
@@ -307,6 +309,27 @@ struct ContentView: View {
         .background(dragDetector)
         .preferredColorScheme(.dark)
         .environmentObject(vm)
+        .onAppear {
+            bluetoothAccessoryMonitor.start()
+            airDropTransferMonitor.start()
+        }
+        .overlay(alignment: .top) {
+            if airDropTransferMonitor.phase != nil && vm.notchState == .closed {
+                AirDropTransferCapsule(monitor: airDropTransferMonitor)
+                    .padding(.top, vm.effectiveClosedNotchHeight + 12)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .zIndex(21)
+            } else if bluetoothAccessoryMonitor.isVisible && vm.notchState == .closed {
+                BluetoothAccessoryHUD(
+                    name: bluetoothAccessoryMonitor.accessoryName,
+                    batteryPercent: bluetoothAccessoryMonitor.batteryPercent,
+                    isBatteryResolved: bluetoothAccessoryMonitor.batteryLookupCompleted
+                )
+                .padding(.top, vm.effectiveClosedNotchHeight + 12)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .zIndex(20)
+            }
+        }
         .onChange(of: coordinator.currentView) { _, view in
             guard vm.notchState == .open, view != .agents else { return }
             withAnimation(.snappy(duration: 0.22)) {
@@ -461,11 +484,10 @@ struct ContentView: View {
                         IslandWidgetsView()
                     }
                 }
-                .transition(
-                    .scale(scale: 0.8, anchor: .top)
-                    .combined(with: .opacity)
-                    .animation(.smooth(duration: 0.35))
-                )
+                // The container resizes as the view opens. Scaling the whole
+                // transcript during that resize caused large rows to composite
+                // over each other; fading avoids a second, competing geometry transform.
+                .transition(.opacity.animation(.easeOut(duration: 0.18)))
                 .zIndex(1)
                 .allowsHitTesting(vm.notchState == .open)
                 .opacity(gestureProgress != 0 ? 1.0 - min(abs(gestureProgress) * 0.1, 0.3) : 1.0)

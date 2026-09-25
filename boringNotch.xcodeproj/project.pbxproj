@@ -12,6 +12,8 @@
 		A16E00032F10000100A61E01 /* AgentSessionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A16E00132F10000100A61E01 /* AgentSessionsView.swift */; };
 		D44A0010C0DE000000000002 /* IslandWidgetsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A0010C0DE000000000001 /* IslandWidgetsView.swift */; };
 		D44A0010C0DE000000000004 /* WidgetCatalogService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A0010C0DE000000000005 /* WidgetCatalogService.swift */; };
+		D44A0010C0DE000000000006 /* BluetoothAccessoryMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A0010C0DE000000000007 /* BluetoothAccessoryMonitor.swift */; };
+		D44A0010C0DE000000000008 /* AirDropTransferMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44A0010C0DE000000000009 /* AirDropTransferMonitor.swift */; };
 		1100290C2E847E2800035A57 /* NSItemProvider+LoadHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1100290B2E847E2800035A57 /* NSItemProvider+LoadHelpers.swift */; };
 		110029272E84FD4C00035A57 /* TemporaryFileStorageService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110029262E84FD4C00035A57 /* TemporaryFileStorageService.swift */; };
 		1100292A2E8691B400035A57 /* FileShareView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110029292E8691B400035A57 /* FileShareView.swift */; };
@@ -192,6 +194,8 @@
 		A16E00132F10000100A61E01 /* AgentSessionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSessionsView.swift; sourceTree = "<group>"; };
 		D44A0010C0DE000000000001 /* IslandWidgetsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IslandWidgetsView.swift; sourceTree = "<group>"; };
 		D44A0010C0DE000000000005 /* WidgetCatalogService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetCatalogService.swift; sourceTree = "<group>"; };
+		D44A0010C0DE000000000007 /* BluetoothAccessoryMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BluetoothAccessoryMonitor.swift; sourceTree = "<group>"; };
+		D44A0010C0DE000000000009 /* AirDropTransferMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AirDropTransferMonitor.swift; sourceTree = "<group>"; };
 		1100290B2E847E2800035A57 /* NSItemProvider+LoadHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NSItemProvider+LoadHelpers.swift"; sourceTree = "<group>"; };
 		110029262E84FD4C00035A57 /* TemporaryFileStorageService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TemporaryFileStorageService.swift; sourceTree = "<group>"; };
 		110029292E8691B400035A57 /* FileShareView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileShareView.swift; sourceTree = "<group>"; };
@@ -542,6 +546,8 @@
 				14C08BB52C8DE42D000F8AA0 /* CalendarManager.swift */,
 				B1F0A0012E60000100000001 /* BrightnessManager.swift */,
 				59D8C23B2E589FAA00147B33 /* VolumeManager.swift */,
+				D44A0010C0DE000000000007 /* BluetoothAccessoryMonitor.swift */,
+				D44A0010C0DE000000000009 /* AirDropTransferMonitor.swift */,
 			);
 			path = managers;
 			sourceTree = "<group>";
@@ -1060,6 +1066,8 @@
 				1100290C2E847E2800035A57 /* NSItemProvider+LoadHelpers.swift in Sources */,
 				11CFC6632E09918400748C80 /* MusicControllerSelectionView.swift in Sources */,
 				B1F0A0022E60000100000001 /* BrightnessManager.swift in Sources */,
+				D44A0010C0DE000000000006 /* BluetoothAccessoryMonitor.swift in Sources */,
+				D44A0010C0DE000000000008 /* AirDropTransferMonitor.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1281,6 +1289,7 @@
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "This app uses AppleEvents to control music";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "This app uses the calendar to display your calendar events";
 				INFOPLIST_KEY_NSCameraUsageDescription = "This app uses the camera to display a live camera view";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "用于识别已连接的蓝牙耳机并读取其公开的电量信息";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSRemindersUsageDescription = "This app uses Reminders to display your scheduled reminder in the calendar";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -1334,6 +1343,7 @@
 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "This app uses AppleEvents to control music";
 				INFOPLIST_KEY_NSCalendarsUsageDescription = "This app uses the calendar to display your calendar events";
 				INFOPLIST_KEY_NSCameraUsageDescription = "This app uses the camera to display a live camera view";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "用于识别已连接的蓝牙耳机并读取其公开的电量信息";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSRemindersUsageDescription = "This app uses Reminders to display your scheduled reminder in the calendar";
 				LD_RUNPATH_SEARCH_PATHS = (

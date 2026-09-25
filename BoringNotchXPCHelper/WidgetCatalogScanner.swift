@@ -15,7 +15,7 @@ enum WidgetCatalogScanner {
     static func scan() -> Data {
         let fileManager = FileManager.default
         let home = fileManager.homeDirectoryForCurrentUser
-        var roots = [
+        let roots = [
             URL(fileURLWithPath: "/Applications", isDirectory: true),
             URL(fileURLWithPath: "/System/Applications", isDirectory: true),
             URL(fileURLWithPath: "/System/Library/CoreServices", isDirectory: true),
@@ -24,12 +24,6 @@ enum WidgetCatalogScanner {
             home.appendingPathComponent("Applications", isDirectory: true),
             home.appendingPathComponent("Library/Extensions", isDirectory: true)
         ]
-        let mountedVolumes = fileManager.mountedVolumeURLs(
-            includingResourceValuesForKeys: [.volumeIsRemovableKey],
-            options: [.skipHiddenVolumes]
-        ) ?? []
-        roots += mountedVolumes.map { $0.appendingPathComponent("Applications", isDirectory: true) }
-
         var results: [String: WidgetCatalogRecord] = [:]
         for root in roots where fileManager.fileExists(atPath: root.path) {
             if root.pathExtension == "appex" {
@@ -140,6 +134,7 @@ enum WidgetCatalogScanner {
         guard let data = try? Data(contentsOf: plistURL),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil),
               let dictionary = plist as? [String: Any] else { return nil }
-        return dictionary
+        let localized = Bundle(url: bundleURL)?.localizedInfoDictionary ?? [:]
+        return dictionary.merging(localized) { _, localizedValue in localizedValue }
     }
 }

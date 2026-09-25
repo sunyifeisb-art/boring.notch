@@ -76,8 +76,9 @@ final class SharingLifecycleDelegate: NSObject, NSSharingServiceDelegate, NSShar
 
 	private var pickerActive = false
 	private var serviceInProgress = false
+	private var isAirDropService = false
+	private var airDropFailure: Error?
 	private var finished = false
-	private var timeoutTask: Task<Void, Never>?
 
 	init(id: UUID, onEnd: @escaping () -> Void, onBegin: @escaping () -> Void, onFinish: @escaping () -> Void) {
 		self.id = id
@@ -86,10 +87,6 @@ final class SharingLifecycleDelegate: NSObject, NSSharingServiceDelegate, NSShar
 		self.onFinish = onFinish
 	}
 	
-	deinit {
-		timeoutTask?.cancel()
-	}
-
 	func markPickerBegan() {
 		guard !pickerActive else { return }
 		pickerActive = true
@@ -100,24 +97,15 @@ final class SharingLifecycleDelegate: NSObject, NSSharingServiceDelegate, NSShar
 		guard !serviceInProgress else { return }
 		serviceInProgress = true
 		onBegin()
-		startTimeoutFallback()
-	}
-	
-	private func startTimeoutFallback() {
-		timeoutTask?.cancel()
-		timeoutTask = Task { @MainActor [weak self] in
-			try? await Task.sleep(for: .seconds(2))
-			guard let self = self, !Task.isCancelled else { return }
-			if !self.finished {
-				self.finishIfNeeded()
-			}
-		}
 	}
 
 	private func finishIfNeeded() {
 		guard !finished else { return }
 		finished = true
-		timeoutTask?.cancel()
+		if isAirDropService {
+			let error = airDropFailure
+			Task { @MainActor in AirDropTransferMonitor.shared.finishSending(error: error) }
+		}
 		onFinish()
 		onEnd()
 	}
@@ -134,7 +122,10 @@ final class SharingLifecycleDelegate: NSObject, NSSharingServiceDelegate, NSShar
 
 		service?.delegate = self
 		serviceInProgress = true
-		startTimeoutFallback()
+		isAirDropService = Self.isAirDrop(service)
+		if isAirDropService {
+			Task { @MainActor in AirDropTransferMonitor.shared.beginSending(items: []) }
+		}
 	}
 
 	// MARK: - NSSharingServiceDelegate
@@ -144,6 +135,10 @@ final class SharingLifecycleDelegate: NSObject, NSSharingServiceDelegate, NSShar
 			onBegin()
 		}
 		serviceInProgress = true
+		if Self.isAirDrop(sharingService) {
+			isAirDropService = true
+			Task { @MainActor in AirDropTransferMonitor.shared.beginSending(items: items) }
+		}
 	}
 
 	func sharingService(_ sharingService: NSSharingService, didShareItems items: [Any]) {
@@ -151,7 +146,16 @@ final class SharingLifecycleDelegate: NSObject, NSSharingServiceDelegate, NSShar
 	}
 
 	func sharingService(_ sharingService: NSSharingService, didFailToShareItems items: [Any], error: Error) {
+		if Self.isAirDrop(sharingService) {
+			isAirDropService = true
+			airDropFailure = error
+		}
 		finishIfNeeded()
 	}
-}
 
+	private static func isAirDrop(_ service: NSSharingService?) -> Bool {
+		guard let service,
+			  let airDropTitle = NSSharingService(named: .sendViaAirDrop)?.title else { return false }
+		return service.title == airDropTitle
+	}
+}

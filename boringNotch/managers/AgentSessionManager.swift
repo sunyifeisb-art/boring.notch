@@ -19,6 +19,9 @@ final class AgentSessionManager: ObservableObject {
     @Published var selectedSessionID: String?
     @Published var requestedOpenSessionID: String?
     @Published var terminalOpenError: String?
+    @Published var workspaceAccessError: String?
+
+    private static let defaultWorkspaceBookmarkKey = "agentDefaultWorkspaceBookmark"
 
     private var pollingTask: Task<Void, Never>?
     private var attentionSessionIDs = Set<String>()
@@ -26,6 +29,7 @@ final class AgentSessionManager: ObservableObject {
     private var refreshInProgress = false
     private var lastAutomaticCodexUsageRefresh: Date?
     private var lastAutomaticCodexUsageSessionIDs = Set<String>()
+    private var activeWorkspaceAccessURL: URL?
 
     var attentionSession: AgentSession? {
         agentSessions.first(where: { $0.status.needsAttention })
@@ -48,6 +52,10 @@ final class AgentSessionManager: ObservableObject {
         return hookInstallMessages.joined(separator: "；")
     }
 
+    var hasDefaultWorkingDirectory: Bool {
+        UserDefaults.standard.data(forKey: Self.defaultWorkspaceBookmarkKey) != nil
+    }
+
     private init() {}
 
     func start() {
@@ -60,9 +68,11 @@ final class AgentSessionManager: ObservableObject {
                 let activeSessions = agentSessions.filter { $0.status == .active || $0.status == .inProgress }
                 let interval: Int
                 if activeSessions.contains(where: \.isManaged) {
-                    interval = 200
+                    // 30 Hz keeps text visually fluid while avoiding a full XPC
+                    // snapshot decode on every display refresh for long histories.
+                    interval = 33
                 } else if !activeSessions.isEmpty {
-                    interval = 350
+                    interval = 50
                 } else {
                     interval = 1_000
                 }
@@ -103,7 +113,10 @@ final class AgentSessionManager: ObservableObject {
         }).value else { return }
 
         lastBridgeRevision = revision
-        guard updatedSessions != sessions else { return }
+        // The bridge revision already tells us whether a session changed. Comparing
+        // full transcripts here walks every character on the main actor on each
+        // streaming update, which can stall the island as replies grow.
+        if revision == nil, updatedSessions == sessions { return }
 
         let previousChromeSignature = chromeSignature(for: sessions)
         let previousActive = Set(agentSessions.filter { $0.status != .completed }.map(\.id))
@@ -237,6 +250,68 @@ final class AgentSessionManager: ObservableObject {
         terminalOpenError = nil
     }
 
+    @discardableResult
+    func setDefaultWorkingDirectory(_ directory: URL) -> Bool {
+        guard directory.isFileURL else { return false }
+        if activeWorkspaceAccessURL?.standardizedFileURL == directory.standardizedFileURL {
+            workspaceAccessError = nil
+            return true
+        }
+        guard directory.startAccessingSecurityScopedResource() else {
+            workspaceAccessError = "无法持续访问所选工作目录。请在文件夹选择窗口中重新授权。"
+            return false
+        }
+        do {
+            let bookmark = try directory.bookmarkData(
+                options: [.withSecurityScope],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+            UserDefaults.standard.set(bookmark, forKey: Self.defaultWorkspaceBookmarkKey)
+            activeWorkspaceAccessURL?.stopAccessingSecurityScopedResource()
+            activeWorkspaceAccessURL = directory
+            workspaceAccessError = nil
+            return true
+        } catch {
+            directory.stopAccessingSecurityScopedResource()
+            workspaceAccessError = "无法保存此文件夹的授权。请重新选择工作目录。\n\(error.localizedDescription)"
+            return false
+        }
+    }
+
+    private func defaultWorkingDirectoryURL() -> URL? {
+        guard let bookmark = UserDefaults.standard.data(forKey: Self.defaultWorkspaceBookmarkKey) else { return nil }
+        var isStale = false
+        do {
+            let directory = try URL(
+                resolvingBookmarkData: bookmark,
+                options: [.withSecurityScope],
+                relativeTo: nil,
+                bookmarkDataIsStale: &isStale
+            )
+            if activeWorkspaceAccessURL?.standardizedFileURL != directory.standardizedFileURL {
+                guard directory.startAccessingSecurityScopedResource() else {
+                    workspaceAccessError = "无法访问默认工作目录。请重新选择一次工作目录授权。"
+                    return nil
+                }
+                activeWorkspaceAccessURL?.stopAccessingSecurityScopedResource()
+                activeWorkspaceAccessURL = directory
+            }
+            if isStale, let refreshed = try? directory.bookmarkData(
+                options: [.withSecurityScope],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            ) {
+                UserDefaults.standard.set(refreshed, forKey: Self.defaultWorkspaceBookmarkKey)
+            }
+            return directory
+        } catch {
+            UserDefaults.standard.removeObject(forKey: Self.defaultWorkspaceBookmarkKey)
+            workspaceAccessError = "默认工作目录授权已失效，请重新选择一次。"
+            return nil
+        }
+    }
+
     func select(_ session: AgentSession) {
         guard ["claude", "codex"].contains(session.source.lowercased()) else { return }
         selectedSessionID = session.id
@@ -245,19 +320,35 @@ final class AgentSessionManager: ObservableObject {
     func requestOpen(_ session: AgentSession) {
         select(session)
         requestedOpenSessionID = session.id
+        BoringViewCoordinator.shared.currentView = .agents
     }
 
-    func newConversation(cwd: String? = nil, prompt: String? = nil) {
+    func newConversation(cwd: String? = nil, prompt: String? = nil, openInIsland: Bool = false) {
         let trimmedPrompt = prompt?.trimmingCharacters(in: .whitespacesAndNewlines)
         let message = trimmedPrompt.map { $0.isEmpty ? "/new" : "/new \($0)" } ?? "/new"
+        let workingDirectory: String?
+        if let cwd {
+            workingDirectory = cwd
+        } else if hasDefaultWorkingDirectory {
+            guard let directory = defaultWorkingDirectoryURL() else { return }
+            workingDirectory = directory.path
+        } else {
+            workingDirectory = nil
+        }
         Task {
             let identifier = await XPCHelperClient.shared.sendAgentMessage(
                 sessionID: nil,
                 source: "claude",
-                cwd: cwd,
+                cwd: workingDirectory,
                 message: message
             )
-            if let identifier { selectedSessionID = identifier }
+            if let identifier {
+                selectedSessionID = identifier
+                if openInIsland {
+                    requestedOpenSessionID = identifier
+                    BoringViewCoordinator.shared.currentView = .agents
+                }
+            }
             await refreshSessions()
         }
     }
@@ -289,11 +380,13 @@ final class AgentSessionManager: ObservableObject {
             return
         }
 
+        let workingDirectory = selected?.cwd ?? cwd ?? (selected == nil ? defaultWorkingDirectoryURL()?.path : nil)
+
         Task {
             let identifier = await XPCHelperClient.shared.sendAgentMessage(
                 sessionID: selected?.id,
                 source: source,
-                cwd: selected?.cwd ?? cwd,
+                cwd: workingDirectory,
                 message: trimmed
             )
             if let identifier {

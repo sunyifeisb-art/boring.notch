@@ -8,8 +8,9 @@
 
 import Darwin
 import Foundation
+import AppKit
 
-private enum BridgeJSONValue: Codable {
+private enum BridgeJSONValue: Codable, Equatable {
     case string(String)
     case number(Double)
     case bool(Bool)
@@ -77,7 +78,7 @@ private struct BridgeHookEvent: Decodable {
     }
 }
 
-private enum BridgeSessionStatus: String, Codable {
+private enum BridgeSessionStatus: String, Codable, Equatable {
     case active
     case idle
     case pending
@@ -98,7 +99,7 @@ private enum BridgeSessionStatus: String, Codable {
     }
 }
 
-private struct BridgeSession: Codable {
+private struct BridgeSession: Codable, Equatable {
     let id: String
     var source: String
     var status: BridgeSessionStatus
@@ -120,7 +121,7 @@ private struct BridgeSession: Codable {
     var lastActivity: Date
 }
 
-private struct BridgeMessage: Codable {
+private struct BridgeMessage: Codable, Equatable {
     let id: UUID
     var role: String
     var text: String
@@ -144,6 +145,14 @@ private struct ClaudeTranscriptLine: Decodable {
 private struct CodexTranscriptLine: Decodable {
     let type: String
     let payload: CodexTranscriptPayload?
+}
+
+private struct CodexTranscriptEvent: Decodable {
+    let turnID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case turnID = "turn_id"
+    }
 }
 
 private struct CodexTranscriptPayload: Decodable {
@@ -250,11 +259,17 @@ final class AgentBridgeService {
             cachedSessionsJSON = nil
         }
     }
+    private var streamCharacterCounts: [UUID: Int] = [:]
     private var pendingConnections: [String: Int32] = [:]
     private var runningProcesses: [String: Process] = [:]
     private var codexUsageProcess: Process?
     private var transcriptStates: [String: TranscriptState] = [:]
     private var codexManagedTurns = Set<String>()
+    private var codexHookSessionIDs = Set<String>()
+    private var codexDesktopFileSizes: [String: UInt64] = [:]
+    private var codexDesktopTimer: DispatchSourceTimer?
+    private var codexDesktopObservers: [NSObjectProtocol] = []
+    private let codexDesktopQueue = DispatchQueue(label: "theboringteam.boringnotch.codex-desktop-sync", qos: .utility)
     private var dismissedSessionIDs = Set<String>()
     private var socketServer: AgentUnixSocketServer?
     private let commandQueue = DispatchQueue(label: "theboringteam.boringnotch.agent-bridge.commands", attributes: .concurrent)
@@ -277,6 +292,7 @@ final class AgentBridgeService {
             }
             socketServer = server
             server.start()
+            startCodexDesktopDiscoveryLocked()
         }
     }
 
@@ -284,6 +300,9 @@ final class AgentBridgeService {
         stateQueue.sync {
             socketServer?.stop()
             socketServer = nil
+            stopCodexDesktopDiscoveryLocked()
+            codexDesktopObservers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
+            codexDesktopObservers.removeAll()
             pendingConnections.values.forEach { Darwin.close($0) }
             pendingConnections.removeAll()
             runningProcesses.values.forEach { $0.terminate() }
@@ -291,10 +310,287 @@ final class AgentBridgeService {
             codexUsageProcess?.terminate()
             codexUsageProcess = nil
             transcriptStates.removeAll()
+            codexHookSessionIDs.removeAll()
             sessions.removeAll()
+            streamCharacterCounts.removeAll(keepingCapacity: false)
             dismissedSessionIDs.removeAll()
             codexManagedTurns.removeAll()
+            codexDesktopFileSizes.removeAll(keepingCapacity: false)
         }
+    }
+
+    private func startCodexDesktopDiscoveryLocked() {
+        guard codexDesktopObservers.isEmpty else {
+            startCodexDesktopPollingLocked()
+            return
+        }
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            let observer = workspaceCenter.addObserver(forName: name, object: nil, queue: nil) { [weak self] notification in
+                guard let runningApp = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                      runningApp.bundleIdentifier == "com.openai.codex"
+                else { return }
+                self?.stateQueue.async {
+                    guard let self, self.socketServer != nil else { return }
+                    if notification.name == NSWorkspace.didLaunchApplicationNotification {
+                        self.startCodexDesktopPollingLocked()
+                    } else {
+                        self.stopCodexDesktopDiscoveryLocked()
+                        for (identifier, var session) in self.sessions where session.source.lowercased() == "codex" {
+                            if session.status == .active || session.status == .inProgress || session.status == .pending {
+                                session.status = .idle
+                                session.lastActivity = Date()
+                                self.sessions[identifier] = session
+                            }
+                        }
+                    }
+                }
+            }
+            codexDesktopObservers.append(observer)
+        }
+        startCodexDesktopPollingLocked()
+    }
+
+    private func startCodexDesktopPollingLocked() {
+        guard codexDesktopTimer == nil,
+              !NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").isEmpty
+        else { return }
+        let timer = DispatchSource.makeTimerSource(queue: codexDesktopQueue)
+        timer.schedule(deadline: .now() + .milliseconds(300), repeating: .seconds(8), leeway: .seconds(2))
+        timer.setEventHandler { [weak self] in
+            self?.discoverCodexDesktopThreads()
+        }
+        codexDesktopTimer = timer
+        timer.resume()
+    }
+
+    private func stopCodexDesktopDiscoveryLocked() {
+        codexDesktopTimer?.cancel()
+        codexDesktopTimer = nil
+    }
+
+    private func discoverCodexDesktopThreads() {
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").isEmpty,
+              stateQueue.sync(execute: { socketServer != nil }),
+              let data = codexDesktopThreadsJSON()
+        else { return }
+
+        stateQueue.async { [weak self] in
+            guard let self, self.socketServer != nil else { return }
+            self.mergeCodexDesktopThreads(from: data)
+        }
+    }
+
+    private func codexDesktopThreadsJSON() -> Data? {
+        guard let executable = codexExecutableURL() else { return nil }
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["app-server", "--stdio"]
+        let input = Pipe()
+        let output = Pipe()
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+
+        let timeout = DispatchWorkItem {
+            if process.isRunning { process.terminate() }
+        }
+        do {
+            try process.run()
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 8, execute: timeout)
+            var buffer = Data()
+            var nextID = 0
+
+            func send(_ method: String, params: [String: Any], requestID: Int?) -> Bool {
+                var request: [String: Any] = ["jsonrpc": "2.0", "method": method, "params": params]
+                if let requestID { request["id"] = requestID }
+                guard var encoded = try? JSONSerialization.data(withJSONObject: request) else { return false }
+                encoded.append(0x0A)
+                do {
+                    try input.fileHandleForWriting.write(contentsOf: encoded)
+                    return true
+                } catch {
+                    return false
+                }
+            }
+
+            func response(for requestID: Int) -> [String: Any]? {
+                while process.isRunning {
+                    if let newline = buffer.firstIndex(of: 0x0A) {
+                        let line = Data(buffer[..<newline])
+                        buffer.removeSubrange(...newline)
+                        guard let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
+                        if (object["id"] as? Int) == requestID { return object }
+                        continue
+                    }
+                    let chunk = output.fileHandleForReading.availableData
+                    guard !chunk.isEmpty else { break }
+                    buffer.append(chunk)
+                    if buffer.count > 4 * 1024 * 1024 { return nil }
+                }
+                return nil
+            }
+
+            nextID += 1
+            let initializeID = nextID
+            guard send(
+                "initialize",
+                params: [
+                    "clientInfo": ["name": "boring_notch", "title": "Boring Notch", "version": "1.0"],
+                    "capabilities": NSNull()
+                ],
+                requestID: initializeID
+            ), let initialize = response(for: initializeID), initialize["error"] == nil else {
+                timeout.cancel()
+                if process.isRunning { process.terminate() }
+                process.waitUntilExit()
+                return nil
+            }
+
+            _ = send("initialized", params: [:], requestID: nil)
+            nextID += 1
+            let listID = nextID
+            guard send(
+                "thread/list",
+                params: ["limit": 30, "sortKey": "updated_at", "sortDirection": "desc", "archived": false],
+                requestID: listID
+            ), let listing = response(for: listID),
+               let result = listing["result"] as? [String: Any],
+               let threads = result["data"] as? [[String: Any]]
+            else {
+                timeout.cancel()
+                if process.isRunning { process.terminate() }
+                process.waitUntilExit()
+                return nil
+            }
+
+            let desktopThreads: [[String: Any]] = threads.compactMap { thread in
+                let originator = thread["originator"] as? String
+                let sourceKind = (thread["sourceKind"] as? String ?? thread["source_kind"] as? String)?.lowercased()
+                guard (originator.map(isCodexDesktopOriginator) == true || sourceKind == "desktop"),
+                      let identifier = thread["id"] as? String,
+                      let path = thread["path"] as? String
+                else { return nil }
+                return [
+                    "id": identifier,
+                    "path": path,
+                    "title": thread["name"] as? String ?? "",
+                    "cwd": thread["cwd"] as? String ?? "",
+                    "createdAt": thread["createdAt"] ?? NSNull(),
+                    "updatedAt": thread["updatedAt"] ?? NSNull(),
+                    "recencyAt": thread["recencyAt"] ?? NSNull()
+                ]
+            }
+            timeout.cancel()
+            process.terminate()
+            process.waitUntilExit()
+            return try? JSONSerialization.data(withJSONObject: desktopThreads)
+        } catch {
+            timeout.cancel()
+            if process.isRunning { process.terminate() }
+            if process.processIdentifier != 0 { process.waitUntilExit() }
+            return nil
+        }
+    }
+
+    private func mergeCodexDesktopThreads(from data: Data) {
+        guard let records = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+        let sessionsRoot = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/sessions", isDirectory: true).standardizedFileURL.path + "/"
+        var needsTranscriptSeed = false
+        var pendingStatuses: [(id: String, status: BridgeSessionStatus, activity: Date)] = []
+
+        for record in records {
+            guard let identifier = record["id"] as? String,
+                  !dismissedSessionIDs.contains(identifier),
+                  let path = record["path"] as? String,
+                  URL(fileURLWithPath: path).standardizedFileURL.path.hasPrefix(sessionsRoot)
+            else { continue }
+
+            let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+            let modifiedAt = attributes?[.modificationDate] as? Date
+            let fileSize = (attributes?[.size] as? NSNumber)?.uint64Value ?? 0
+            let updatedAt = codexDate(record["updatedAt"])
+            let recencyAt = codexDate(record["recencyAt"])
+            let createdAt = codexDate(record["createdAt"])
+            let activity = updatedAt ?? recencyAt ?? modifiedAt ?? Date()
+            let isRecentlyWritten = modifiedAt.map { Date().timeIntervalSince($0) < 30 } ?? false
+            let previousSize = codexDesktopFileSizes[identifier]
+            let fileChanged = previousSize.map { $0 != fileSize } ?? false
+            let discoveredStatus: BridgeSessionStatus = (isRecentlyWritten || fileChanged) ? .inProgress : .completed
+
+            var session: BridgeSession
+            if let existing = sessions[identifier] {
+                session = existing
+                if let title = record["title"] as? String, !title.isEmpty { session.title = title }
+                if let cwd = record["cwd"] as? String, !cwd.isEmpty { session.cwd = cwd }
+                session.resumeID = identifier
+                if !codexHookSessionIDs.contains(identifier) {
+                    session.status = discoveredStatus
+                    session.lastActivity = fileChanged ? Date() : activity
+                }
+                if transcriptStates[identifier]?.path != path {
+                    registerTranscript(path: path, sessionID: identifier, tailWindow: 64 * 1024)
+                    needsTranscriptSeed = true
+                }
+                if session != existing { sessions[identifier] = session }
+            } else {
+                session = BridgeSession(
+                    id: identifier,
+                    source: "codex",
+                    status: .inProgress,
+                    cwd: record["cwd"] as? String,
+                    lastUserText: nil,
+                    lastAssistantMessage: nil,
+                    toolName: nil,
+                    toolInput: nil,
+                    title: (record["title"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                    environment: [:],
+                    tty: nil,
+                    terminalBundleID: "com.openai.codex",
+                    ghosttyTerminalID: nil,
+                    resumeID: identifier,
+                    turnID: nil,
+                    isManaged: false,
+                    messages: [],
+                    startedAt: createdAt ?? activity,
+                    lastActivity: Date()
+                )
+                sessions[identifier] = session
+                registerTranscript(path: path, sessionID: identifier, tailWindow: 64 * 1024)
+                needsTranscriptSeed = true
+            }
+
+            if fileSize == 0, transcriptStates[identifier] == nil { continue }
+            pendingStatuses.append((identifier, discoveredStatus, fileChanged ? Date() : activity))
+            codexDesktopFileSizes[identifier] = fileSize
+        }
+
+        if needsTranscriptSeed { refreshTranscriptStreamsLocked() }
+        for pending in pendingStatuses where !codexHookSessionIDs.contains(pending.id) {
+            guard var session = sessions[pending.id] else { continue }
+            session.status = pending.status
+            session.lastActivity = pending.activity
+            if sessions[pending.id] != session { sessions[pending.id] = session }
+        }
+    }
+
+    private func codexDate(_ value: Any?) -> Date? {
+        if let timestamp = value as? NSNumber {
+            let seconds = timestamp.doubleValue > 10_000_000_000
+                ? timestamp.doubleValue / 1_000
+                : timestamp.doubleValue
+            return Date(timeIntervalSince1970: seconds)
+        }
+        guard let string = value as? String else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: string) ?? ISO8601DateFormatter().date(from: string)
+    }
+
+    private func isCodexDesktopOriginator(_ originator: String) -> Bool {
+        let normalized = originator.lowercased()
+        return normalized.contains("codex desktop") || normalized.contains("codex_work_desktop")
     }
 
     func sessionsRevision() -> UInt64 {
@@ -474,7 +770,9 @@ final class AgentBridgeService {
 
         var visibleSession = session
         visibleSession.messages = visibleMessages.reversed()
-        visibleSession.lastAssistantMessage = session.lastAssistantMessage.map {
+        let latestAssistantText = session.messages.last(where: { $0.role == "assistant" })?.text
+            ?? session.lastAssistantMessage
+        visibleSession.lastAssistantMessage = latestAssistantText.map {
             boundedText($0, maximumCharacters: 4_000)
         }
         visibleSession.lastUserText = session.lastUserText.map {
@@ -500,7 +798,11 @@ final class AgentBridgeService {
             }
 
             dismissedSessionIDs.insert(sessionID)
-            sessions.removeValue(forKey: sessionID)
+            if let removed = sessions.removeValue(forKey: sessionID) {
+                for message in removed.messages {
+                    streamCharacterCounts.removeValue(forKey: message.id)
+                }
+            }
             transcriptStates.removeValue(forKey: sessionID)
             codexManagedTurns.remove(sessionID)
             processToStop = runningProcesses.removeValue(forKey: sessionID)
@@ -1049,6 +1351,8 @@ final class AgentBridgeService {
             beginAgentStream(sessionID: sessionID, messageID: streamMessageID)
 
             var lineBuffer = Data()
+            var discardOversizedLine = false
+            let maximumStreamLineBytes = 2 * 1024 * 1024
             var fallbackText: String?
             var finalText: String?
             var latestSnapshot: String?
@@ -1077,7 +1381,10 @@ final class AgentBridgeService {
                 }
                 if let delta = event.delta, !delta.isEmpty {
                     pendingDelta += delta
-                    if pendingDelta.count >= 64 || Date().timeIntervalSince(lastDeltaFlush) >= 0.04 {
+                    // Batch at the active transcript's 30 Hz display cadence.
+                    // This preserves smooth text while avoiding redundant full
+                    // history snapshots between frames.
+                    if Date().timeIntervalSince(lastDeltaFlush) >= 0.033 {
                         flushPendingDelta()
                     }
                 }
@@ -1097,14 +1404,32 @@ final class AgentBridgeService {
             while true {
                 let chunk = outputPipe.fileHandleForReading.availableData
                 if chunk.isEmpty { break }
-                lineBuffer.append(chunk)
-                while let newline = lineBuffer.firstIndex(of: 0x0A) {
-                    let line = lineBuffer.prefix(upTo: newline)
-                    consumeLine(Data(line))
-                    lineBuffer.removeSubrange(...newline)
+                if discardOversizedLine {
+                    guard let newline = chunk.firstIndex(of: 0x0A) else { continue }
+                    discardOversizedLine = false
+                    lineBuffer.append(contentsOf: chunk[chunk.index(after: newline)...])
+                } else {
+                    lineBuffer.append(chunk)
+                }
+                var lineStart = lineBuffer.startIndex
+                while let newline = lineBuffer[lineStart...].firstIndex(of: 0x0A) {
+                    let line = Data(lineBuffer[lineStart..<newline])
+                    if line.count <= maximumStreamLineBytes {
+                        consumeLine(line)
+                    }
+                    lineStart = lineBuffer.index(after: newline)
+                }
+                if lineStart > lineBuffer.startIndex {
+                    lineBuffer.removeSubrange(lineBuffer.startIndex..<lineStart)
+                }
+                if lineBuffer.count > maximumStreamLineBytes {
+                    lineBuffer.removeAll(keepingCapacity: false)
+                    discardOversizedLine = true
                 }
             }
-            if !lineBuffer.isEmpty { consumeLine(lineBuffer) }
+            if !discardOversizedLine, !lineBuffer.isEmpty, lineBuffer.count <= maximumStreamLineBytes {
+                consumeLine(lineBuffer)
+            }
             flushPendingDelta()
             process.waitUntilExit()
             errorPipe.fileHandleForReading.readabilityHandler = nil
@@ -1167,6 +1492,7 @@ final class AgentBridgeService {
 
         var messageID = 0
         var lineBuffer = Data()
+        var bufferedLineStart = 0
         var finalStatus = "Codex 任务已结束。"
         var failed = false
 
@@ -1184,16 +1510,24 @@ final class AgentBridgeService {
 
             func readMessage() throws -> [String: Any] {
                 while true {
-                    if let newline = lineBuffer.firstIndex(of: 0x0A) {
-                        let line = Data(lineBuffer[..<newline])
-                        lineBuffer.removeSubrange(...newline)
+                    if bufferedLineStart < lineBuffer.endIndex,
+                       let newline = lineBuffer[bufferedLineStart...].firstIndex(of: 0x0A) {
+                        let line = Data(lineBuffer[bufferedLineStart..<newline])
+                        bufferedLineStart = lineBuffer.index(after: newline)
+                        if bufferedLineStart == lineBuffer.endIndex {
+                            lineBuffer.removeAll(keepingCapacity: true)
+                            bufferedLineStart = 0
+                        } else if bufferedLineStart >= 64 * 1024 {
+                            lineBuffer.removeSubrange(lineBuffer.startIndex..<bufferedLineStart)
+                            bufferedLineStart = 0
+                        }
                         if let object = try JSONSerialization.jsonObject(with: line) as? [String: Any] { return object }
                         continue
                     }
                     let chunk = outputPipe.fileHandleForReading.availableData
                     guard !chunk.isEmpty else { throw NSError(domain: "CodexAppServer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Codex app-server closed its output."]) }
                     lineBuffer.append(chunk)
-                    if lineBuffer.count > 2 * 1024 * 1024 {
+                    if lineBuffer.count - bufferedLineStart > 2 * 1024 * 1024 {
                         throw NSError(domain: "CodexAppServer", code: 2, userInfo: [NSLocalizedDescriptionKey: "Codex app-server sent an oversized protocol message."])
                     }
                 }
@@ -1376,12 +1710,25 @@ final class AgentBridgeService {
     }
 
     private func codexExecutableURL() -> URL? {
-        let bundledPaths = [
-            "/Applications/ChatGPT.app/Contents/Resources/codex",
-            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/ChatGPT.app/Contents/Resources/codex").path
+        var installedCodexApps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex")
+            .compactMap(\.bundleURL)
+        installedCodexApps.append(contentsOf: [
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex"),
+            URL(fileURLWithPath: "/Applications/Codex.app"),
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Codex.app")
+        ].compactMap { $0 })
+        for appURL in installedCodexApps {
+            let executable = appURL.appendingPathComponent("Contents/Resources/codex")
+            if FileManager.default.isExecutableFile(atPath: executable.path) { return executable }
+        }
+
+        let installedChatGPTApps = [
+            URL(fileURLWithPath: "/Applications/ChatGPT.app"),
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/ChatGPT.app")
         ]
-        if let path = bundledPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
-            return URL(fileURLWithPath: path)
+        for appURL in installedChatGPTApps {
+            let executable = appURL.appendingPathComponent("Contents/Resources/codex")
+            if FileManager.default.isExecutableFile(atPath: executable.path) { return executable }
         }
         return executableURL(named: "codex")
     }
@@ -1410,18 +1757,36 @@ final class AgentBridgeService {
 
     private func appendAgentStream(_ delta: String, sessionID: String, messageID: UUID) {
         stateQueue.async { [weak self] in
-            guard let self, var session = self.sessions[sessionID],
-                  let index = session.messages.firstIndex(where: { $0.id == messageID })
+            guard let self,
+                  let index = self.sessions[sessionID]?.messages.firstIndex(where: { $0.id == messageID })
             else { return }
-            session.messages[index].text = self.boundedText(
-                session.messages[index].text + delta,
-                maximumCharacters: 100_000
-            )
-            session.lastAssistantMessage = session.messages[index].text
-            session.status = .inProgress
-            session.lastActivity = Date()
-            self.sessions[sessionID] = session
+
+            let characterCount = (self.streamCharacterCounts[messageID] ?? 0) + delta.count
+            // Mutate the stored String directly. Copying the whole session and
+            // rebuilding its complete response for every stream delta made long
+            // replies increasingly expensive to render and relay.
+            self.modifySession(sessionID) { session in
+                session.messages[index].text.append(contentsOf: delta)
+                if characterCount >= 110_000 {
+                    session.messages[index].text = self.boundedText(
+                        session.messages[index].text,
+                        maximumCharacters: 100_000
+                    )
+                }
+                session.status = .inProgress
+                session.lastActivity = Date()
+            }
+            if characterCount >= 110_000 {
+                self.streamCharacterCounts[messageID] = 100_000
+            } else {
+                self.streamCharacterCounts[messageID] = characterCount
+            }
         }
+    }
+
+    private func modifySession(_ sessionID: String, _ modify: (inout BridgeSession) -> Void) {
+        guard sessions[sessionID] != nil else { return }
+        modify(&sessions[sessionID]!)
     }
 
     private func completeAgentRun(
@@ -1443,6 +1808,7 @@ final class AgentBridgeService {
             if let streamMessageID,
                let index = session.messages.firstIndex(where: { $0.id == streamMessageID })
             {
+                self.streamCharacterCounts.removeValue(forKey: streamMessageID)
                 if let cleaned, !cleaned.isEmpty {
                     session.messages[index].text = cleaned
                 } else if session.messages[index].text.isEmpty {
@@ -1655,6 +2021,9 @@ final class AgentBridgeService {
             }
 
             let eventName = self.normalizedEventName(event.hookEventName)
+            if event.source?.lowercased() == "codex" {
+                self.codexHookSessionIDs.insert(event.sessionID)
+            }
             if self.dismissedSessionIDs.contains(event.sessionID) {
                 if eventName == "SessionEnd" {
                     self.dismissedSessionIDs.remove(event.sessionID)
@@ -1789,10 +2158,9 @@ final class AgentBridgeService {
         }
     }
 
-    private func registerTranscript(path: String, sessionID: String) {
+    private func registerTranscript(path: String, sessionID: String, tailWindow: UInt64 = 256 * 1024) {
         guard transcriptStates[sessionID]?.path != path else { return }
         let fileSize = ((try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? NSNumber)?.uint64Value ?? 0
-        let tailWindow: UInt64 = 256 * 1024
         let startOffset = fileSize > tailWindow ? fileSize - tailWindow : 0
         transcriptStates[sessionID] = TranscriptState(
             path: path,
@@ -1955,6 +2323,15 @@ final class AgentBridgeService {
         guard !codexManagedTurns.contains(session.id) else { return }
         // Codex transcript rows are append-only JSONL envelopes. Decode only
         // message rows; tool payloads and image blocks can be very large.
+        if line.range(of: Data("\"type\":\"event_msg\"".utf8)) != nil
+            || line.range(of: Data("\"type\": \"event_msg\"".utf8)) != nil
+        {
+            if let event = try? transcriptDecoder.decode(CodexTranscriptEvent.self, from: line),
+               let turnID = event.turnID {
+                session.turnID = turnID
+            }
+            return
+        }
         guard line.range(of: Data("\"type\":\"response_item\"".utf8)) != nil
                 || line.range(of: Data("\"type\": \"response_item\"".utf8)) != nil,
               let entry = try? transcriptDecoder.decode(CodexTranscriptLine.self, from: line),
