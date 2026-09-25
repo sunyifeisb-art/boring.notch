@@ -315,12 +315,7 @@ struct ContentView: View {
             airDropTransferMonitor.start()
         }
         .overlay(alignment: .top) {
-            if airDropTransferMonitor.phase != nil && vm.notchState == .closed {
-                AirDropTransferCapsule(monitor: airDropTransferMonitor)
-                    .padding(.top, vm.effectiveClosedNotchHeight + 12)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .zIndex(21)
-            } else if bluetoothAccessoryMonitor.isVisible && vm.notchState == .closed {
+            if bluetoothAccessoryMonitor.isVisible && vm.notchState == .closed {
                 BluetoothAccessoryHUD(
                     name: bluetoothAccessoryMonitor.accessoryName,
                     batteryPercent: bluetoothAccessoryMonitor.batteryPercent,
@@ -385,7 +380,10 @@ struct ContentView: View {
                     .padding(.top, 40)
                     Spacer()
                 } else {
-                    if coordinator.expandingView.type == .battery && coordinator.expandingView.show
+                    if airDropTransferMonitor.phase != nil && vm.notchState == .closed {
+                        AirDropTransferHUD(monitor: airDropTransferMonitor)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    } else if coordinator.expandingView.type == .battery && coordinator.expandingView.show
                         && vm.notchState == .closed && Defaults[.showPowerStatusNotifications]
                     {
                         HStack(spacing: 0) {

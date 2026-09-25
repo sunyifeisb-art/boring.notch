@@ -265,66 +265,84 @@ final class AirDropTransferMonitor: ObservableObject {
     }
 }
 
-struct AirDropTransferCapsule: View {
+struct AirDropTransferHUD: View {
     @ObservedObject var monitor: AirDropTransferMonitor
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "airdrop")
-                .font(.system(size: 16, weight: .semibold))
-                .frame(width: 24)
-            VStack(alignment: .leading, spacing: 4) {
+        VStack(spacing: 0) {
+            HStack(spacing: 9) {
+                Image(systemName: "airdrop")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 20)
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
-                if let fileURL = monitor.fileURL {
-                    Text(fileURL.lastPathComponent)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.68))
-                        .lineLimit(1)
-                }
-                if monitor.phase == .sending || monitor.phase == .receiving {
-                    ProgressView(value: monitor.fractionCompleted)
-                        .progressViewStyle(.linear)
-                        .tint(.white)
-                        .frame(maxWidth: 180)
-                        .accessibilityLabel(monitor.fractionCompleted.map { "隔空投送进度 \(Int($0 * 100))%" } ?? "隔空投送进行中")
-                }
-            }
-            Spacer(minLength: 6)
-            if monitor.phase == .received {
-                Button("打开") { monitor.openReceivedFile() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                Button("在访达中显示") { monitor.showReceivedFileInFinder() }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-            } else {
-                if let fraction = monitor.fractionCompleted, monitor.phase == .sending || monitor.phase == .receiving {
+                Spacer(minLength: 8)
+                if let fraction = monitor.fractionCompleted,
+                   monitor.phase == .sending || monitor.phase == .receiving {
                     Text("\(Int(fraction * 100))%")
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .monospacedDigit()
                 }
-                if monitor.phase == .failed {
-                    Text("未能发送").font(.system(size: 12, weight: .medium)).foregroundStyle(.orange)
+                if monitor.phase != .received {
+                    Button { monitor.dismiss() } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .frame(width: 22, height: 22)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .accessibilityLabel("关闭隔空投送状态")
                 }
-                Button {
-                    monitor.dismiss()
-                } label: {
-                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white.opacity(0.65))
             }
+            .foregroundStyle(.white)
+            .frame(height: 34)
+
+            VStack(alignment: .leading, spacing: 10) {
+                if let fileURL = monitor.fileURL {
+                    Text(fileURL.lastPathComponent)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                if monitor.phase == .sending || monitor.phase == .receiving {
+                    ProgressView(value: monitor.fractionCompleted)
+                        .progressViewStyle(.linear)
+                        .tint(.black)
+                        .accessibilityLabel(monitor.fractionCompleted.map { "隔空投送进度 \(Int($0 * 100))%" } ?? "隔空投送进行中")
+                } else if monitor.phase == .failed {
+                    Text("传输失败")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.red)
+                }
+
+                if monitor.phase == .received {
+                    HStack(spacing: 8) {
+                        Button("打开") { monitor.openReceivedFile() }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.black)
+                            .controlSize(.small)
+                        Button("在访达中显示") { monitor.showReceivedFileInFinder() }
+                            .buttonStyle(.bordered)
+                            .tint(.black)
+                            .controlSize(.small)
+                    }
+                }
+            }
+            .font(.system(size: 12))
+            .foregroundStyle(.black)
+            .padding(.horizontal, 13)
+            .padding(.vertical, 11)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.white, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .frame(minWidth: 340, maxWidth: 580, alignment: .leading)
-        .foregroundStyle(.white)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(.white.opacity(0.12), lineWidth: 1))
-        .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
-        .transition(.move(edge: .top).combined(with: .opacity).combined(with: .scale(scale: 0.96)))
+        .padding(.horizontal, 14)
+        .padding(.bottom, 14)
+        .frame(minWidth: 360, maxWidth: 560, alignment: .top)
+        .background(.black)
+        .transition(.move(edge: .top).combined(with: .opacity))
     }
 
     private var title: String {
