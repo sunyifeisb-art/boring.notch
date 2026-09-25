@@ -741,6 +741,8 @@ private struct AgentConversationTimeline: View {
                                     AgentMessageRow(
                                         message: message,
                                         source: session.source,
+                                        isLatestAssistantMessage: message.id == session.messages.last?.id
+                                            && message.role == "assistant",
                                         isStreaming: message.id == session.messages.last?.id
                                             && message.role == "assistant"
                                             && (session.status == .active || session.status == .inProgress)
@@ -856,9 +858,11 @@ private struct AgentConversationTimeline: View {
                             }
                             .onChange(of: activeMessageID) { _, identifier in
                                 guard let identifier else { return }
-                                withAnimation(.easeOut(duration: 0.16)) {
-                                    outlineProxy.scrollTo(identifier, anchor: .center)
-                                }
+                                // The outline follows the main transcript while
+                                // the user scrolls. Animating every active-row
+                                // change queues overlapping nested scroll
+                                // animations and can stall long conversations.
+                                outlineProxy.scrollTo(identifier, anchor: .center)
                             }
                         }
                     }
@@ -932,6 +936,7 @@ private struct AgentConversationTimeline: View {
 private struct AgentMessageRow: View, Equatable {
     let message: AgentMessage
     let source: String
+    let isLatestAssistantMessage: Bool
     let isStreaming: Bool
 
     private var isUser: Bool { message.role == "user" }
@@ -942,6 +947,7 @@ private struct AgentMessageRow: View, Equatable {
         guard lhs.message.id == rhs.message.id,
               lhs.message.role == rhs.message.role,
               lhs.source == rhs.source,
+              lhs.isLatestAssistantMessage == rhs.isLatestAssistantMessage,
               lhs.isStreaming == rhs.isStreaming
         else { return false }
 
@@ -991,12 +997,19 @@ private struct AgentMessageRow: View, Equatable {
                         // Keep live output responsive: parsing Markdown, formulas,
                         // tables and code blocks against the entire growing reply
                         // on every stream update caused expensive repeated layout.
-                        Text(message.text.isEmpty ? "…" : message.text)
+                        Text(streamingPreview)
                             .font(.system(size: 12.5))
                             .foregroundStyle(isError ? Color.red : Color.primary)
                             .lineSpacing(1.5)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
+                    } else if message.text.count > AgentMessageRenderingLimits.pageCharacters {
+                        AgentPagedMessageContent(
+                            text: message.text,
+                            isError: isError,
+                            messageID: message.id,
+                            startsAtEnd: isLatestAssistantMessage
+                        )
                     } else {
                         AgentMarkdownContent(
                             text: message.text.isEmpty ? "…" : message.text,
@@ -1026,6 +1039,12 @@ private struct AgentMessageRow: View, Equatable {
         }
     }
 
+    private var streamingPreview: String {
+        let limit = AgentMessageRenderingLimits.pageCharacters
+        guard message.text.count > limit else { return message.text.isEmpty ? "…" : message.text }
+        return "…较长回复正在输出，当前显示末尾内容…\n" + String(message.text.suffix(limit))
+    }
+
     private var roleColor: Color {
         switch message.role {
         case "user": return .blue
@@ -1039,6 +1058,93 @@ private struct AgentMessageRow: View, Equatable {
         if isUser { return Color.blue.opacity(0.13) }
         if isError { return Color.red.opacity(0.09) }
         return Color.white.opacity(0.055)
+    }
+}
+
+private enum AgentMessageRenderingLimits {
+    static let pageCharacters = 6_000
+}
+
+/// Long messages are rendered in bounded pages. A single SwiftUI Text view
+/// containing tens of thousands of characters can monopolize layout while a
+/// LazyVStack recalculates its height during scrolling; paging keeps each row's
+/// active text layout to a predictable size without dropping the rest.
+private struct AgentPagedMessageContent: View {
+    private let text: String
+    private let isError: Bool
+    private let messageID: UUID
+    private let pageRanges: [Range<String.Index>]
+    @State private var pageIndex: Int
+
+    init(text: String, isError: Bool, messageID: UUID, startsAtEnd: Bool) {
+        self.text = text
+        self.isError = isError
+        self.messageID = messageID
+        let ranges = Self.makePageRanges(in: text)
+        self.pageRanges = ranges
+        _pageIndex = State(initialValue: startsAtEnd ? max(0, ranges.count - 1) : 0)
+    }
+
+    private var pageCount: Int { pageRanges.count }
+
+    private var currentPageText: String {
+        guard pageRanges.indices.contains(pageIndex) else { return text }
+        return String(text[pageRanges[pageIndex]])
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            AgentMarkdownContent(text: currentPageText, isError: isError, messageID: messageID)
+
+            HStack(spacing: 8) {
+                Text("长消息分段显示，避免滚动时一次排版整篇内容")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                Button("上一段") {
+                    pageIndex = max(0, pageIndex - 1)
+                }
+                .disabled(pageIndex == 0)
+
+                Text("\(pageIndex + 1)/\(pageCount)")
+                    .font(.system(size: 9, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.secondary)
+
+                Button("下一段") {
+                    pageIndex = min(pageCount - 1, pageIndex + 1)
+                }
+                .disabled(pageIndex >= pageCount - 1)
+            }
+            .buttonStyle(.borderless)
+            .font(.system(size: 9, weight: .medium))
+        }
+        .padding(.top, 2)
+    }
+
+    private static func makePageRanges(in text: String) -> [Range<String.Index>] {
+        guard !text.isEmpty else { return [text.startIndex..<text.endIndex] }
+        var ranges: [Range<String.Index>] = []
+        var start = text.startIndex
+        while start < text.endIndex {
+            let proposedEnd = text.index(
+                start,
+                offsetBy: AgentMessageRenderingLimits.pageCharacters,
+                limitedBy: text.endIndex
+            ) ?? text.endIndex
+            var end = proposedEnd
+            if proposedEnd < text.endIndex,
+               let newline = text[start..<proposedEnd].range(of: "\n", options: .backwards)
+            {
+                end = newline.upperBound
+            }
+            if end <= start { end = proposedEnd }
+            ranges.append(start..<end)
+            start = end
+        }
+        return ranges
     }
 }
 
