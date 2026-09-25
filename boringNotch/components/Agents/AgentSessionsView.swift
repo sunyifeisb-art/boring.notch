@@ -491,7 +491,7 @@ struct AgentSessionsView: View {
                 }
             }
 
-            if showsTarget, !activeCodexSessionIDs.isEmpty {
+            if showsTarget, manager.isCodexDesktopRunning || !activeCodexSessionIDs.isEmpty {
                 Button {
                     manager.refreshCodexUsage()
                 } label: {

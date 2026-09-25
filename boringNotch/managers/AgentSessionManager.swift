@@ -3,6 +3,7 @@
 //  boringNotch
 //
 
+import AppKit
 import Foundation
 
 @MainActor
@@ -13,6 +14,7 @@ final class AgentSessionManager: ObservableObject {
     @Published private(set) var bridgeError: String?
     @Published private(set) var hookInstallMessages: [String] = []
     @Published private(set) var codexUsage: AgentUsageSnapshot?
+    @Published private(set) var isCodexDesktopRunning = false
     @Published private(set) var isRefreshingCodexUsage = false
     @Published private(set) var isInstallingHooks = false
     @Published private(set) var closingSessionIDs = Set<String>()
@@ -30,6 +32,8 @@ final class AgentSessionManager: ObservableObject {
     private var lastAutomaticCodexUsageRefresh: Date?
     private var lastAutomaticCodexUsageSessionIDs = Set<String>()
     private var activeWorkspaceAccessURL: URL?
+    private var activeWorkspaceAccessStarted = false
+    private var codexApplicationObservers: [NSObjectProtocol] = []
 
     var attentionSession: AgentSession? {
         agentSessions.first(where: { $0.status.needsAttention })
@@ -60,6 +64,7 @@ final class AgentSessionManager: ObservableObject {
 
     func start() {
         guard pollingTask == nil else { return }
+        observeCodexDesktopLifecycle()
         pollingTask = Task { [weak self] in
             guard let self else { return }
             bridgeError = await XPCHelperClient.shared.startAgentBridge()
@@ -84,6 +89,14 @@ final class AgentSessionManager: ObservableObject {
     func stop() {
         pollingTask?.cancel()
         pollingTask = nil
+        codexApplicationObservers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
+        codexApplicationObservers.removeAll()
+        isCodexDesktopRunning = false
+        if activeWorkspaceAccessStarted {
+            activeWorkspaceAccessURL?.stopAccessingSecurityScopedResource()
+        }
+        activeWorkspaceAccessURL = nil
+        activeWorkspaceAccessStarted = false
         lastBridgeRevision = nil
         sessions.removeAll(keepingCapacity: false)
         attentionSessionIDs.removeAll(keepingCapacity: false)
@@ -164,7 +177,7 @@ final class AgentSessionManager: ObservableObject {
 
     func refreshCodexUsageIfNeeded(activeSessionIDs: [String]) {
         let activeIDs = Set(activeSessionIDs)
-        guard !activeIDs.isEmpty else {
+        guard isCodexDesktopRunning else {
             lastAutomaticCodexUsageSessionIDs.removeAll(keepingCapacity: false)
             return
         }
@@ -179,6 +192,45 @@ final class AgentSessionManager: ObservableObject {
         lastAutomaticCodexUsageSessionIDs = activeIDs
         lastAutomaticCodexUsageRefresh = Date()
         refreshCodexUsage()
+    }
+
+    private func observeCodexDesktopLifecycle() {
+        let center = NSWorkspace.shared.notificationCenter
+        guard codexApplicationObservers.isEmpty else { return }
+        let appNotifications: [Notification.Name] = [
+            NSWorkspace.didLaunchApplicationNotification,
+            NSWorkspace.didTerminateApplicationNotification
+        ]
+        for name in appNotifications {
+            let observer = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                      app.bundleIdentifier == "com.openai.codex"
+                else { return }
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    let running = notification.name == NSWorkspace.didLaunchApplicationNotification
+                    self.isCodexDesktopRunning = running
+                    if running, BoringViewCoordinator.shared.currentView == .agents {
+                        self.refreshCodexUsageIfNeeded(activeSessionIDs: self.activeCodexSessionIDs)
+                    } else if !running && self.activeCodexSessionIDs.isEmpty {
+                        self.codexUsage = nil
+                        self.lastAutomaticCodexUsageRefresh = nil
+                        self.lastAutomaticCodexUsageSessionIDs.removeAll(keepingCapacity: false)
+                    }
+                }
+            }
+            codexApplicationObservers.append(observer)
+        }
+        isCodexDesktopRunning = !NSRunningApplication.runningApplications(
+            withBundleIdentifier: "com.openai.codex"
+        ).isEmpty
+    }
+
+    private var activeCodexSessionIDs: [String] {
+        agentSessions
+            .filter { $0.source.lowercased() == "codex" && $0.status != .completed }
+            .map(\.id)
+            .sorted()
     }
 
     private func chromeSignature(for sessions: [AgentSession]) -> [String] {
@@ -257,23 +309,37 @@ final class AgentSessionManager: ObservableObject {
             workspaceAccessError = nil
             return true
         }
-        guard directory.startAccessingSecurityScopedResource() else {
-            workspaceAccessError = "无法持续访问所选工作目录。请在文件夹选择窗口中重新授权。"
-            return false
-        }
+        let didStartAccessing = directory.startAccessingSecurityScopedResource()
         do {
-            let bookmark = try directory.bookmarkData(
-                options: [.withSecurityScope],
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil
-            )
+            let bookmark: Data
+            do {
+                bookmark = try directory.bookmarkData(
+                    options: [.withSecurityScope],
+                    includingResourceValuesForKeys: nil,
+                    relativeTo: nil
+                )
+            } catch {
+                // GitHub Actions builds are ad-hoc signed and do not carry the
+                // app-scope bookmark entitlement. In that build, a regular
+                // bookmark is still durable because the helper runs unsandboxed.
+                bookmark = try directory.bookmarkData(
+                    options: [],
+                    includingResourceValuesForKeys: nil,
+                    relativeTo: nil
+                )
+            }
             UserDefaults.standard.set(bookmark, forKey: Self.defaultWorkspaceBookmarkKey)
-            activeWorkspaceAccessURL?.stopAccessingSecurityScopedResource()
+            if activeWorkspaceAccessStarted {
+                activeWorkspaceAccessURL?.stopAccessingSecurityScopedResource()
+            }
             activeWorkspaceAccessURL = directory
+            activeWorkspaceAccessStarted = didStartAccessing
             workspaceAccessError = nil
             return true
         } catch {
-            directory.stopAccessingSecurityScopedResource()
+            if didStartAccessing {
+                directory.stopAccessingSecurityScopedResource()
+            }
             workspaceAccessError = "无法保存此文件夹的授权。请重新选择工作目录。\n\(error.localizedDescription)"
             return false
         }
@@ -282,27 +348,51 @@ final class AgentSessionManager: ObservableObject {
     private func defaultWorkingDirectoryURL() -> URL? {
         guard let bookmark = UserDefaults.standard.data(forKey: Self.defaultWorkspaceBookmarkKey) else { return nil }
         var isStale = false
+        let directory: URL
         do {
-            let directory = try URL(
-                resolvingBookmarkData: bookmark,
-                options: [.withSecurityScope],
-                relativeTo: nil,
-                bookmarkDataIsStale: &isStale
-            )
-            if activeWorkspaceAccessURL?.standardizedFileURL != directory.standardizedFileURL {
-                guard directory.startAccessingSecurityScopedResource() else {
-                    workspaceAccessError = "无法访问默认工作目录。请重新选择一次工作目录授权。"
-                    return nil
-                }
-                activeWorkspaceAccessURL?.stopAccessingSecurityScopedResource()
-                activeWorkspaceAccessURL = directory
+            do {
+                directory = try URL(
+                    resolvingBookmarkData: bookmark,
+                    options: [.withSecurityScope],
+                    relativeTo: nil,
+                    bookmarkDataIsStale: &isStale
+                )
+            } catch {
+                // Match the bookmark format used when the app has no sandbox
+                // entitlement, instead of deleting the saved workspace and
+                // reopening the folder picker on every new conversation.
+                directory = try URL(
+                    resolvingBookmarkData: bookmark,
+                    options: [],
+                    relativeTo: nil,
+                    bookmarkDataIsStale: &isStale
+                )
             }
-            if isStale, let refreshed = try? directory.bookmarkData(
-                options: [.withSecurityScope],
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil
-            ) {
-                UserDefaults.standard.set(refreshed, forKey: Self.defaultWorkspaceBookmarkKey)
+            let values = try directory.resourceValues(forKeys: [.isDirectoryKey])
+            guard values.isDirectory == true else {
+                throw CocoaError(.fileReadNoPermission)
+            }
+            if activeWorkspaceAccessURL?.standardizedFileURL != directory.standardizedFileURL {
+                let didStartAccessing = directory.startAccessingSecurityScopedResource()
+                if activeWorkspaceAccessStarted {
+                    activeWorkspaceAccessURL?.stopAccessingSecurityScopedResource()
+                }
+                activeWorkspaceAccessURL = directory
+                activeWorkspaceAccessStarted = didStartAccessing
+            }
+            if isStale {
+                let refreshed = (try? directory.bookmarkData(
+                    options: [.withSecurityScope],
+                    includingResourceValuesForKeys: nil,
+                    relativeTo: nil
+                )) ?? (try? directory.bookmarkData(
+                    options: [],
+                    includingResourceValuesForKeys: nil,
+                    relativeTo: nil
+                ))
+                if let refreshed {
+                    UserDefaults.standard.set(refreshed, forKey: Self.defaultWorkspaceBookmarkKey)
+                }
             }
             return directory
         } catch {
