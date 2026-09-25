@@ -951,11 +951,12 @@ private struct AgentMessageRow: View, Equatable {
               lhs.isStreaming == rhs.isStreaming
         else { return false }
 
-        // Completed transcript rows are immutable. Comparing their full text
-        // on every live-stream refresh made opening and updating a long
-        // conversation scan every character in every historical message. Only
-        // the one actively streaming row needs its text checked for a redraw.
-        return !lhs.isStreaming || lhs.message.text == rhs.message.text
+        // Completed transcript rows are immutable. A live stream only appends
+        // text, so compare its constant-time byte length and a short tail sample
+        // instead of rescanning the entire growing response 30 times per second.
+        guard lhs.isStreaming else { return true }
+        return lhs.message.text.utf8.count == rhs.message.text.utf8.count
+            && lhs.message.text.suffix(96) == rhs.message.text.suffix(96)
     }
 
     var body: some View {
@@ -1003,7 +1004,7 @@ private struct AgentMessageRow: View, Equatable {
                             .lineSpacing(1.5)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
-                    } else if message.text.count > AgentMessageRenderingLimits.pageCharacters {
+                    } else if message.text.utf8.count > AgentMessageRenderingLimits.pageByteThreshold {
                         AgentPagedMessageContent(
                             text: message.text,
                             isError: isError,
@@ -1040,9 +1041,11 @@ private struct AgentMessageRow: View, Equatable {
     }
 
     private var streamingPreview: String {
-        let limit = AgentMessageRenderingLimits.pageCharacters
-        guard message.text.count > limit else { return message.text.isEmpty ? "…" : message.text }
-        return "…较长回复正在输出，当前显示末尾内容…\n" + String(message.text.suffix(limit))
+        let limit = AgentMessageRenderingLimits.livePreviewCharacters
+        guard message.text.utf8.count > AgentMessageRenderingLimits.livePreviewByteThreshold else {
+            return message.text.isEmpty ? "…" : message.text
+        }
+        return "…正在生成；实时预览最近内容，完成后可翻阅全文…\n" + String(message.text.suffix(limit))
     }
 
     private var roleColor: Color {
@@ -1063,6 +1066,9 @@ private struct AgentMessageRow: View, Equatable {
 
 private enum AgentMessageRenderingLimits {
     static let pageCharacters = 6_000
+    static let pageByteThreshold = 6_000
+    static let livePreviewCharacters = 1_200
+    static let livePreviewByteThreshold = 2_400
 }
 
 /// Long messages are rendered in bounded pages. A single SwiftUI Text view
