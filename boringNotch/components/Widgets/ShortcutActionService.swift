@@ -1,7 +1,7 @@
 import Combine
 import Foundation
 
-struct ShortcutActionExecution: Decodable {
+struct ShortcutActionExecution: Codable {
     let output: String?
     let error: String?
 }
