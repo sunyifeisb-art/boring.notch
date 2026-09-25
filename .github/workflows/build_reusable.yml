@@ -131,6 +131,25 @@ jobs:
             -exportPath Release \
             -exportOptionsPlist "$RUNNER_TEMP/export_options.plist"
 
+      - name: Verify stable app signature
+        run: |
+          set -euo pipefail
+          APP_PATH="Release/$PROJECT_NAME.app"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          INFO_IDENTIFIER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Contents/Info.plist")
+          SIGNATURE_DETAILS=$(codesign -dv --verbose=4 "$APP_PATH" 2>&1)
+          SIGNED_IDENTIFIER=$(printf '%s\n' "$SIGNATURE_DETAILS" | sed -n 's/^Identifier=//p')
+          SIGNED_TEAM=$(printf '%s\n' "$SIGNATURE_DETAILS" | sed -n 's/^TeamIdentifier=//p')
+          if [[ "$SIGNED_IDENTIFIER" != "$INFO_IDENTIFIER" ]]; then
+            echo "::error::Signed identifier ($SIGNED_IDENTIFIER) does not match Info.plist ($INFO_IDENTIFIER)"
+            exit 1
+          fi
+          if [[ -z "$SIGNED_TEAM" || "$SIGNED_TEAM" != "$DEVELOPMENT_TEAM" ]]; then
+            echo "::error::App was not signed by the configured stable Apple Development team"
+            exit 1
+          fi
+          echo "Verified signed app identity: $SIGNED_IDENTIFIER ($SIGNED_TEAM)"
+
       - name: Create DMG
         run: |
           VENV_DIR="$RUNNER_TEMP/venv"
