@@ -296,11 +296,78 @@ final class AgentBridgeService {
     private var lastBackgroundTranscriptRefresh = Date.distantPast
     private var lastStaleCodexReconciliation = Date.distantPast
     private var dismissedSessionIDs = Set<String>()
+    private var managedSessionWrites: [String: DispatchWorkItem] = [:]
     private var socketServer: AgentUnixSocketServer?
     private let commandQueue = DispatchQueue(label: "theboringteam.boringnotch.agent-bridge.commands", attributes: .concurrent)
 
     private static var baseDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".boring-notch", isDirectory: true)
+    }
+
+    private static var managedSessionsDirectory: URL {
+        baseDirectory.appendingPathComponent("managed-sessions", isDirectory: true)
+    }
+
+    private static func managedSessionURL(_ sessionID: String) -> URL? {
+        let prefix = "managed-claude-"
+        guard sessionID.hasPrefix(prefix),
+              UUID(uuidString: String(sessionID.dropFirst(prefix.count))) != nil
+        else { return nil }
+        return managedSessionsDirectory.appendingPathComponent("\(sessionID).json")
+    }
+
+    private func restoreManagedSessionsLocked() {
+        let directory = Self.managedSessionsDirectory
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil
+        ) else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        for file in files where file.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: file),
+                  var session = try? decoder.decode(BridgeSession.self, from: data),
+                  Self.managedSessionURL(session.id)?.lastPathComponent == file.lastPathComponent,
+                  session.source.lowercased() == "claude"
+            else { continue }
+            if [.active, .inProgress, .pending, .waitingForApproval, .waitingForAnswer].contains(session.status) {
+                session.status = .interrupted
+            }
+            sessions[session.id] = session
+        }
+    }
+
+    private func persistManagedSessionLocked(_ sessionID: String) {
+        guard let session = sessions[sessionID],
+              let url = Self.managedSessionURL(sessionID)
+        else { return }
+        do {
+            let directory = Self.managedSessionsDirectory
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            _ = chmod(directory.path, 0o700)
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            try encoder.encode(session).write(to: url, options: .atomic)
+            _ = chmod(url.path, 0o600)
+        } catch {
+            NSLog("Unable to preserve managed Claude conversation: %@", error.localizedDescription)
+        }
+    }
+
+    private func scheduleManagedSessionPersistenceLocked(_ sessionID: String) {
+        guard Self.managedSessionURL(sessionID) != nil,
+              managedSessionWrites[sessionID] == nil
+        else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.managedSessionWrites.removeValue(forKey: sessionID)
+            self.persistManagedSessionLocked(sessionID)
+        }
+        managedSessionWrites[sessionID] = work
+        stateQueue.asyncAfter(deadline: .now() + 1, execute: work)
     }
 
     private static var socketDirectoryURL: URL {
@@ -348,6 +415,7 @@ final class AgentBridgeService {
             guard socketServer == nil else { return }
             try Self.prepareSocketDirectory()
             Self.refreshInstalledHookScriptIfPresent()
+            restoreManagedSessionsLocked()
             let server = try AgentUnixSocketServer(path: Self.socketURL.path) { [weak self] data, descriptor in
                 self?.handle(data: data, descriptor: descriptor)
             }
@@ -359,6 +427,11 @@ final class AgentBridgeService {
 
     func stop() {
         stateQueue.sync {
+            managedSessionWrites.values.forEach { $0.cancel() }
+            managedSessionWrites.removeAll()
+            for identifier in sessions.keys where Self.managedSessionURL(identifier) != nil {
+                persistManagedSessionLocked(identifier)
+            }
             socketServer?.stop()
             socketServer = nil
             stopCodexDesktopDiscoveryLocked()
@@ -1035,12 +1108,18 @@ final class AgentBridgeService {
                 .waitingForApproval,
                 .waitingForAnswer
             ].contains(session.status)
-            return !mustRetain && session.lastActivity <= staleCutoff ? identifier : nil
+            return !mustRetain
+                && Self.managedSessionURL(identifier) == nil
+                && session.lastActivity <= staleCutoff ? identifier : nil
         }
         let retainedCount = 30
         if sessions.count - staleSessionIDs.count > retainedCount {
             let additional = sessions.values
-                .filter { $0.status == .completed || $0.status == .idle || $0.status == .interrupted || $0.status == .failed }
+                .filter {
+                    Self.managedSessionURL($0.id) == nil
+                        && ($0.status == .completed || $0.status == .idle
+                            || $0.status == .interrupted || $0.status == .failed)
+                }
                 .sorted { $0.lastActivity < $1.lastActivity }
                 .prefix(max(0, sessions.count - staleSessionIDs.count - retainedCount))
                 .map(\.id)
@@ -1180,6 +1259,10 @@ final class AgentBridgeService {
                     streamCharacterCounts.removeValue(forKey: message.id)
                 }
             }
+            managedSessionWrites.removeValue(forKey: sessionID)?.cancel()
+            if let url = Self.managedSessionURL(sessionID) {
+                try? FileManager.default.removeItem(at: url)
+            }
             transcriptStates.removeValue(forKey: sessionID)
             codexDesktopFileSizes.removeValue(forKey: sessionID)
             codexManagedTurns.remove(sessionID)
@@ -1208,6 +1291,7 @@ final class AgentBridgeService {
                 session.status = .inProgress
                 session.lastActivity = Date()
                 sessions[sessionID] = session
+                scheduleManagedSessionPersistenceLocked(sessionID)
             }
             return true
         }
@@ -1366,6 +1450,7 @@ final class AgentBridgeService {
             updated.status = .active
             updated.lastActivity = Date()
             sessions[sessionID] = updated
+            scheduleManagedSessionPersistenceLocked(sessionID)
         }
         return true
     }
@@ -1576,6 +1661,7 @@ final class AgentBridgeService {
                 updated.status = .inProgress
                 updated.lastActivity = Date()
                 sessions[existing.id] = updated
+                scheduleManagedSessionPersistenceLocked(existing.id)
                 terminalRequest = (existing.id, commands, false)
                 return existing.id
             }
@@ -1611,6 +1697,7 @@ final class AgentBridgeService {
                     startedAt: Date(),
                     lastActivity: Date()
                 )
+                persistManagedSessionLocked(targetID)
             } else {
                 guard let sessionID else { return nil }
                 targetID = sessionID
@@ -1624,6 +1711,7 @@ final class AgentBridgeService {
                     updated.status = .inProgress
                     updated.lastActivity = Date()
                     sessions[targetID] = updated
+                    persistManagedSessionLocked(targetID)
                 }
             }
 
@@ -2183,6 +2271,7 @@ final class AgentBridgeService {
             session.status = .inProgress
             session.lastActivity = Date()
             self.sessions[sessionID] = session
+            self.scheduleManagedSessionPersistenceLocked(sessionID)
         }
     }
 
@@ -2194,6 +2283,7 @@ final class AgentBridgeService {
             else { return }
             session.resumeID = resumeID
             self.sessions[sessionID] = session
+            self.scheduleManagedSessionPersistenceLocked(sessionID)
         }
     }
 
@@ -2223,6 +2313,7 @@ final class AgentBridgeService {
             } else {
                 self.streamCharacterCounts[messageID] = characterCount
             }
+            self.scheduleManagedSessionPersistenceLocked(sessionID)
         }
     }
 
@@ -2271,6 +2362,7 @@ final class AgentBridgeService {
             session.status = failed ? .failed : .completed
             session.lastActivity = Date()
             self.sessions[sessionID] = session
+            self.persistManagedSessionLocked(sessionID)
         }
     }
 
@@ -2281,6 +2373,7 @@ final class AgentBridgeService {
         session.status = status
         session.lastActivity = Date()
         sessions[sessionID] = session
+        scheduleManagedSessionPersistenceLocked(sessionID)
     }
 
     private func trimMessageHistory(_ session: inout BridgeSession) {
@@ -2510,7 +2603,7 @@ final class AgentBridgeService {
             session.terminalBundleID = event.terminalBundleID ?? session.terminalBundleID
             session.ghosttyTerminalID = event.ghosttyTerminalID ?? session.ghosttyTerminalID
             session.turnID = event.turnID ?? session.turnID
-            if event.ghosttyTerminalID != nil {
+            if event.ghosttyTerminalID != nil && Self.managedSessionURL(event.sessionID) == nil {
                 session.isManaged = false
             }
             session.lastActivity = now
@@ -2524,8 +2617,9 @@ final class AgentBridgeService {
             case "SessionEnd":
                 self.transcriptStates.removeValue(forKey: event.sessionID)
                 self.codexDesktopFileSizes.removeValue(forKey: event.sessionID)
-                if session.isManaged {
-                    session.status = .idle
+                if session.isManaged || Self.managedSessionURL(event.sessionID) != nil {
+                    session.status = .completed
+                    session.lastActivity = now
                     self.sessions[event.sessionID] = session
                 } else {
                     self.sessions.removeValue(forKey: event.sessionID)
@@ -2596,6 +2690,8 @@ final class AgentBridgeService {
             default:
                 self.sessions[event.sessionID] = session
             }
+
+            self.scheduleManagedSessionPersistenceLocked(event.sessionID)
 
             if !holdsConnection { Darwin.close(descriptor) }
         }

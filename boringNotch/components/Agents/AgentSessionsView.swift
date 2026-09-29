@@ -24,9 +24,15 @@ struct AgentSessionsView: View {
     private var displayedSessions: [AgentSession] {
         let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
         let sessions = manager.agentSessions
-        let active = sessions.filter { $0.status.isRunningOrWaiting }
+        // Conversations created here belong to the user until they explicitly
+        // close them, including after the Claude process finishes.
+        let owned = sessions
+            .filter { $0.id.hasPrefix("managed-claude-") }
+            .sorted { $0.lastActivity > $1.lastActivity }
+        let external = sessions.filter { !$0.id.hasPrefix("managed-claude-") }
+        let active = external.filter { $0.status.isRunningOrWaiting }
         let recentIdle = Array(
-            sessions
+            external
                 .filter {
                     !$0.status.isTerminal
                         && !$0.status.isRunningOrWaiting
@@ -38,7 +44,7 @@ struct AgentSessionsView: View {
         )
         let recentCompleted = showCompleted
             ? Array(
-                sessions
+                external
                     .filter {
                         $0.status.isTerminal
                             && $0.startedAt >= cutoff
@@ -49,7 +55,7 @@ struct AgentSessionsView: View {
             )
             : []
 
-        return active + recentIdle + recentCompleted
+        return owned + active + recentIdle + recentCompleted
     }
 
     private var selectedAgentSession: AgentSession? {
