@@ -766,8 +766,11 @@ private struct AgentConversationTimeline: View {
 
     @State private var isOutlineExpanded = false
     @State private var activeMessageID: UUID?
-    @State private var trackedMessageID: UUID?
-    @State private var isFollowingLatest = true
+    @State private var visibleMessageCount = 10
+
+    private var visibleMessages: [AgentMessage] {
+        Array(session.messages.suffix(visibleMessageCount))
+    }
 
     var body: some View {
         Group {
@@ -783,7 +786,17 @@ private struct AgentConversationTimeline: View {
                     ZStack(alignment: .trailing) {
                         ScrollView(.vertical, showsIndicators: false) {
                             LazyVStack(spacing: 9) {
-                                ForEach(session.messages) { message in
+                                if session.messages.count > visibleMessageCount {
+                                    Button("显示更早消息") {
+                                        visibleMessageCount = min(session.messages.count, visibleMessageCount + 10)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
+                                }
+                                ForEach(visibleMessages) { message in
                                     AgentMessageRow(
                                         message: message,
                                         source: session.source,
@@ -800,23 +813,18 @@ private struct AgentConversationTimeline: View {
                             .padding(.leading, 2)
                             .padding(.trailing, 17)
                             .padding(.vertical, 1)
-                            .scrollTargetLayout()
                         }
-                        .scrollPosition(id: $trackedMessageID, anchor: .bottom)
                         .defaultScrollAnchor(.bottom)
-                        .onChange(of: trackedMessageID) { _, identifier in
-                            activeMessageID = identifier
-                            isFollowingLatest = identifier == session.messages.last?.id
-                        }
 
                         conversationOutline(using: proxy)
                     }
                     .onAppear {
-                        trackedMessageID = session.messages.last?.id
+                        activeMessageID = session.messages.last?.id
                     }
                     .onChange(of: session.messages.count) { _, _ in
-                        if isFollowingLatest || session.messages.last?.role == "user" {
-                            trackedMessageID = session.messages.last?.id
+                        if let latestID = session.messages.last?.id {
+                            activeMessageID = latestID
+                            proxy.scrollTo(latestID, anchor: .bottom)
                         }
                     }
                 }
@@ -868,7 +876,7 @@ private struct AgentConversationTimeline: View {
                         ScrollViewReader { outlineProxy in
                             ScrollView(.vertical, showsIndicators: false) {
                                 VStack(alignment: .leading, spacing: 3) {
-                                    ForEach(Array(session.messages.enumerated()), id: \.element.id) { index, message in
+                                    ForEach(Array(visibleMessages.enumerated()), id: \.element.id) { index, message in
                                         Button {
                                             withAnimation(.easeInOut(duration: 0.24)) {
                                                 proxy.scrollTo(message.id, anchor: .top)
@@ -878,7 +886,7 @@ private struct AgentConversationTimeline: View {
                                                 Circle()
                                                     .fill(message.role == "user" ? Color.blue : Color.gray.opacity(0.65))
                                                     .frame(width: 5, height: 5)
-                                                Text(outlineTitle(for: message, index: index))
+                                                Text(outlineTitle(for: message, index: index + session.messages.count - visibleMessages.count))
                                                     .font(.system(size: 10, weight: message.role == "user" ? .medium : .regular))
                                                     .lineLimit(1)
                                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -912,7 +920,7 @@ private struct AgentConversationTimeline: View {
                             }
                         }
                     }
-                    .frame(width: 190, height: min(270, max(130, CGFloat(session.messages.count) * 28 + 42)))
+                    .frame(width: 190, height: min(270, max(130, CGFloat(visibleMessages.count) * 28 + 42)))
                     .background(.white, in: RoundedRectangle(cornerRadius: 14))
                     .overlay {
                         RoundedRectangle(cornerRadius: 14)
@@ -928,13 +936,13 @@ private struct AgentConversationTimeline: View {
                             .fill(Color.white.opacity(0.72))
                             .frame(width: 2, height: geometry.size.height * 0.72)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        ForEach(Array(session.messages.enumerated()), id: \.element.id) { index, message in
+                        ForEach(Array(visibleMessages.enumerated()), id: \.element.id) { index, message in
                             Capsule()
                                 .fill(Color.white.opacity(message.id == activeMessageID ? 1 : 0.48))
                                 .frame(width: message.id == activeMessageID ? 12 : (index.isMultiple(of: 4) ? 9 : 5), height: message.id == activeMessageID ? 3 : 2)
                                 .position(
                                     x: geometry.size.width / 2,
-                                    y: markerY(index: index, count: session.messages.count, height: geometry.size.height)
+                                    y: markerY(index: index, count: visibleMessages.count, height: geometry.size.height)
                                 )
                         }
                     }
@@ -997,12 +1005,9 @@ private struct AgentMessageRow: View, Equatable {
               lhs.isStreaming == rhs.isStreaming
         else { return false }
 
-        // Completed transcript rows are immutable. A live stream only appends
-        // text, so compare its constant-time byte length and a short tail sample
-        // instead of rescanning the entire growing response 30 times per second.
-        guard lhs.isStreaming else { return true }
-        return lhs.message.text.utf8.count == rhs.message.text.utf8.count
-            && lhs.message.text.suffix(96) == rhs.message.text.suffix(96)
+        // A transcript refresh can fill an older summary row without changing
+        // its identifier. Compare the content so it cannot remain stuck at "…".
+        return lhs.message.text == rhs.message.text
     }
 
     var body: some View {
@@ -1021,59 +1026,76 @@ private struct AgentMessageRow: View, Equatable {
             HStack(alignment: .bottom, spacing: 0) {
                 if isUser { Spacer(minLength: 24) }
 
-                AgentBubbleLayout(
-                    maximumWidth: isUser ? 520 : 900,
-                    prefersIntrinsicWidth: !isStreaming && message.text.utf8.prefix(145).count <= 144
-                ) {
-                    VStack(alignment: isUser ? .trailing : .leading, spacing: 2) {
-                    HStack(spacing: 4) {
-                        Text(roleLabel)
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(roleColor)
-                        if isStreaming {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .scaleEffect(0.6)
-                            Text("实时")
-                                .font(.system(size: 9, weight: .medium))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    if isStreaming {
-                        // Parse only the bounded live preview so Markdown is
-                        // visible during generation without laying out the
-                        // entire growing response on every stream update.
-                        AgentMarkdownContent(
-                            text: streamingPreview,
-                            isError: isError,
-                            messageID: message.id
-                        )
-                    } else if message.text.utf8.count > AgentMessageRenderingLimits.pageByteThreshold {
-                        AgentPagedMessageContent(
-                            text: message.text,
-                            isError: isError,
-                            messageID: message.id,
-                            startsAtEnd: isLatestAssistantMessage
-                        )
-                    } else {
-                        AgentMarkdownContent(
-                            text: message.text.isEmpty ? "…" : message.text,
-                            isError: isError,
-                            messageID: message.id
-                        )
-                        .multilineTextAlignment(isUser ? .trailing : .leading)
-                    }
-                    }
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 8)
-                    .background(bubbleColor, in: RoundedRectangle(cornerRadius: 11))
-                }
+                bubble
 
                 if !isUser { Spacer(minLength: 24) }
             }
             .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
         }
+    }
+
+    @ViewBuilder
+    private var bubble: some View {
+        if isUser {
+            bubbleContent
+                .frame(width: compactUserBubbleWidth, alignment: .trailing)
+                .background(bubbleColor, in: RoundedRectangle(cornerRadius: 11))
+                .frame(maxWidth: 520, alignment: .trailing)
+        } else {
+            bubbleContent
+                .frame(maxWidth: 900, alignment: .leading)
+                .background(bubbleColor, in: RoundedRectangle(cornerRadius: 11))
+        }
+    }
+
+    private var compactUserBubbleWidth: CGFloat? {
+        guard message.text.utf8.count <= 144, !message.text.contains("\n") else { return nil }
+        let width = (message.text as NSString).size(
+            withAttributes: [.font: NSFont.systemFont(ofSize: 12.5)]
+        ).width
+        return min(520, max(48, ceil(width) + 28))
+    }
+
+    private var bubbleContent: some View {
+        VStack(alignment: isUser ? .trailing : .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Text(roleLabel)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(roleColor)
+                if isStreaming {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .scaleEffect(0.6)
+                    Text("实时")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if isStreaming {
+                AgentMarkdownContent(
+                    text: streamingPreview,
+                    isError: isError,
+                    messageID: message.id
+                )
+            } else if message.text.utf8.count > AgentMessageRenderingLimits.pageByteThreshold {
+                AgentPagedMessageContent(
+                    text: message.text,
+                    isError: isError,
+                    messageID: message.id,
+                    startsAtEnd: isLatestAssistantMessage
+                )
+            } else {
+                AgentMarkdownContent(
+                    text: message.text.isEmpty ? "…" : message.text,
+                    isError: isError,
+                    messageID: message.id
+                )
+                .multilineTextAlignment(isUser ? .trailing : .leading)
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
     }
 
     private var roleLabel: String {
@@ -1110,8 +1132,8 @@ private struct AgentMessageRow: View, Equatable {
 }
 
 private enum AgentMessageRenderingLimits {
-    static let pageCharacters = 6_000
-    static let pageByteThreshold = 6_000
+    static let pageCharacters = 1_800
+    static let pageByteThreshold = 1_800
     static let livePreviewCharacters = 1_200
     static let livePreviewByteThreshold = 2_400
 }
@@ -1216,36 +1238,6 @@ private struct AgentPagedMessageContent: View {
             start = end
         }
         return ranges
-    }
-}
-
-private struct AgentBubbleLayout: Layout {
-    let maximumWidth: CGFloat
-    let prefersIntrinsicWidth: Bool
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        guard let content = subviews.first else { return .zero }
-        let availableWidth = min(maximumWidth, proposal.width ?? maximumWidth)
-        // Measuring a streaming message with an unspecified width makes SwiftUI
-        // shape its entire growing text as one unbounded line on every update.
-        // Constrain the first measurement so long replies wrap immediately and
-        // short messages can still report their natural width.
-        let constrainedSize = content.sizeThatFits(ProposedViewSize(width: availableWidth, height: proposal.height))
-        guard prefersIntrinsicWidth else { return constrainedSize }
-
-        // Short, completed messages should hug their text. Keep the intrinsic
-        // measurement off the live stream and off long messages so an expanding
-        // response can never trigger an unbounded layout pass.
-        let naturalSize = content.sizeThatFits(.unspecified)
-        return naturalSize.width <= availableWidth ? naturalSize : constrainedSize
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        guard let content = subviews.first else { return }
-        content.place(
-            at: bounds.origin,
-            proposal: ProposedViewSize(width: bounds.width, height: bounds.height)
-        )
     }
 }
 
