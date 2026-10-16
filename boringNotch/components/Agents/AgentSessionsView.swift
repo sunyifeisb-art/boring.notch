@@ -267,8 +267,16 @@ struct AgentSessionsView: View {
             detailHeader(session: session)
                 .frame(height: 30)
 
-            AgentConversationTimeline(session: session)
-                .id(session.id)
+            Group {
+                if manager.loadedConversationSessionID == session.id {
+                    AgentConversationTimeline(session: session)
+                        .id(session.id)
+                } else {
+                    ProgressView("正在加载历史消息…")
+                        .controlSize(.small)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay {
                     if isDroppingFileContext {

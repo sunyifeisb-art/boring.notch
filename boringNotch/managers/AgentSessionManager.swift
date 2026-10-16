@@ -20,6 +20,7 @@ final class AgentSessionManager: ObservableObject {
     @Published private(set) var closingSessionIDs = Set<String>()
     @Published var selectedSessionID: String?
     @Published private(set) var visibleConversationSessionID: String?
+    @Published private(set) var loadedConversationSessionID: String?
     @Published var requestedOpenSessionID: String?
     @Published var terminalOpenError: String?
     @Published var workspaceAccessError: String?
@@ -104,6 +105,7 @@ final class AgentSessionManager: ObservableObject {
         attentionSessionIDs.removeAll(keepingCapacity: false)
         selectedSessionID = nil
         visibleConversationSessionID = nil
+        loadedConversationSessionID = nil
         requestedOpenSessionID = nil
         codexUsage = nil
         XPCHelperClient.shared.stopAgentBridge()
@@ -123,8 +125,10 @@ final class AgentSessionManager: ObservableObject {
             }
         }
 
-        let detailSessionID = BoringViewCoordinator.shared.currentView == .agents
-            ? visibleConversationSessionID : nil
+        // A visible conversation must always request its full transcript.
+        // Summary snapshots deliberately blank older message bodies; asking
+        // for a summary while the detail is open turns history into "…".
+        let detailSessionID = visibleConversationSessionID
         let revision = await XPCHelperClient.shared.agentSessionsRevision(detailSessionID: detailSessionID)
         if !force, let revision, revision == lastBridgeRevision,
            detailSessionID == lastBridgeDetailedSessionID
@@ -156,6 +160,9 @@ final class AgentSessionManager: ObservableObject {
         let updatedAttention = Set(updatedAgentSessions.filter { $0.status.needsAttention }.map(\.id))
         let newAttention = updatedAttention.subtracting(attentionSessionIDs)
         sessions = updatedSessions
+        if detailSessionID == visibleConversationSessionID {
+            loadedConversationSessionID = detailSessionID
+        }
         attentionSessionIDs = updatedAttention
         if let selectedSessionID,
            !updatedSessions.contains(where: { $0.id == selectedSessionID && ["claude", "codex"].contains($0.source.lowercased()) })
@@ -442,7 +449,13 @@ final class AgentSessionManager: ObservableObject {
     }
 
     func setVisibleConversationSessionID(_ sessionID: String?) {
+        if visibleConversationSessionID != sessionID {
+            loadedConversationSessionID = nil
+        }
         visibleConversationSessionID = sessionID
+        if sessionID != nil {
+            Task { await refreshSessions(force: true) }
+        }
     }
 
     func requestOpen(_ session: AgentSession) {
