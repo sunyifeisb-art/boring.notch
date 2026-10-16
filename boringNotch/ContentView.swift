@@ -105,6 +105,17 @@ struct ContentView: View {
         return agentManager.sessions.first(where: { !$0.status.isTerminal }) ?? agentManager.sessions.first
     }
 
+    private var shouldKeepAgentConversationOpen: Bool {
+        guard agentIslandEnabled, coordinator.currentView == .agents else { return false }
+        if isAgentComposerFocused || isAgentComposerFocusPending
+            || agentManager.requestedOpenSessionID != nil { return true }
+        // Sending can replace the composer and resize the conversation. Ignore
+        // the resulting transient hover exit until the new layout has settled.
+        return lastAgentMessageSubmittedAt.map {
+            Date().timeIntervalSince($0) < 1.5
+        } ?? false
+    }
+
     var body: some View {
         let _ = agentChromeRevision
         // Calculate scale based on gesture progress only
@@ -325,7 +336,7 @@ struct ContentView: View {
             try? await Task.sleep(for: .milliseconds(500))
             var outsideSince: Date?
             while !Task.isCancelled && vm.notchState == .open {
-                if vm.isMouseHovering() || vm.isBatteryPopoverActive
+                if vm.isMouseHovering() || shouldKeepAgentConversationOpen || vm.isBatteryPopoverActive
                     || SharingStateManager.shared.preventNotchClose {
                     outsideSince = nil
                 } else if let outsideSince {
@@ -361,6 +372,7 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .agentMessageSubmitted)) { _ in
             lastAgentMessageSubmittedAt = Date()
+            hoverTask?.cancel()
         }
         .onReceive(NotificationCenter.default.publisher(for: .agentComposerFocusChanged)) { notification in
             isAgentComposerFocused = notification.userInfo?["focused"] as? Bool ?? false
@@ -740,8 +752,7 @@ struct ContentView: View {
                 }
                 
                 await MainActor.run {
-                    if self.isAgentComposerFocused || self.isAgentComposerFocusPending
-                        || self.agentManager.requestedOpenSessionID != nil {
+                    if self.shouldKeepAgentConversationOpen {
                         withAnimation(self.animationSpring) {
                             self.isHovering = false
                         }
@@ -773,9 +784,7 @@ struct ContentView: View {
         hoverTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(120))
             guard !Task.isCancelled,
-                  !isAgentComposerFocused,
-                  !isAgentComposerFocusPending,
-                  agentManager.requestedOpenSessionID == nil,
+                  !shouldKeepAgentConversationOpen,
                   vm.notchState == .open,
                   !vm.isMouseHovering(),
                   !vm.isBatteryPopoverActive,
