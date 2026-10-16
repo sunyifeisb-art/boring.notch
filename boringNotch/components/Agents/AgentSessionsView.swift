@@ -20,6 +20,7 @@ struct AgentSessionsView: View {
     @AppStorage("agentIslandShowRecentCompleted") private var showCompleted = false
     @State private var composerFocused = false
     @State private var composerFocusRequest = 0
+    @State private var composerClearRequest = 0
 
     private var displayedSessions: [AgentSession] {
         let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
@@ -578,6 +579,7 @@ struct AgentSessionsView: View {
                 placeholder: composerPlaceholder(for: target),
                 fontSize: showsTarget ? 11 : 12.5,
                 focusRequest: composerFocusRequest,
+                clearRequest: composerClearRequest,
                 onSubmit: { sendDraft(to: target) }
             )
                 .frame(maxWidth: .infinity)
@@ -621,6 +623,7 @@ struct AgentSessionsView: View {
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else { return }
         draft = ""
+        composerClearRequest &+= 1
         NotificationCenter.default.post(name: .agentMessageSubmitted, object: nil)
 
         if message == "/history", let target {
@@ -1026,15 +1029,14 @@ private struct AgentMessageRow: View, Equatable {
                     }
 
                     if isStreaming {
-                        // Keep live output responsive: parsing Markdown, formulas,
-                        // tables and code blocks against the entire growing reply
-                        // on every stream update caused expensive repeated layout.
-                        Text(streamingPreview)
-                            .font(.system(size: 12.5))
-                            .foregroundStyle(isError ? Color.red : Color.primary)
-                            .lineSpacing(1.5)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
+                        // Parse only the bounded live preview so Markdown is
+                        // visible during generation without laying out the
+                        // entire growing response on every stream update.
+                        AgentMarkdownContent(
+                            text: streamingPreview,
+                            isError: isError,
+                            messageID: message.id
+                        )
                     } else if message.text.utf8.count > AgentMessageRenderingLimits.pageByteThreshold {
                         AgentPagedMessageContent(
                             text: message.text,
@@ -2122,6 +2124,7 @@ private struct AgentComposerTextField: NSViewRepresentable {
     let placeholder: String
     let fontSize: CGFloat
     let focusRequest: Int
+    let clearRequest: Int
     let onSubmit: () -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -2153,7 +2156,12 @@ private struct AgentComposerTextField: NSViewRepresentable {
     func updateNSView(_ field: NSTextField, context: Context) {
         context.coordinator.parent = self
         field.font = .systemFont(ofSize: fontSize)
-        if field.stringValue != text {
+        if context.coordinator.lastAppliedClearRequest != clearRequest {
+            context.coordinator.lastAppliedClearRequest = clearRequest
+            field.stringValue = text
+        } else if field.currentEditor() == nil && field.stringValue != text {
+            // SwiftUI may deliver a stale binding during typing or IME
+            // composition. Leave AppKit's active field editor untouched.
             field.stringValue = text
         }
         updatePlaceholder(for: field)
@@ -2180,6 +2188,7 @@ private struct AgentComposerTextField: NSViewRepresentable {
         var parent: AgentComposerTextField
         weak var field: NSTextField?
         var lastAppliedFocusRequest = 0
+        var lastAppliedClearRequest = 0
 
         init(parent: AgentComposerTextField) {
             self.parent = parent
@@ -2200,6 +2209,10 @@ private struct AgentComposerTextField: NSViewRepresentable {
 
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             guard commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
+            if textView.hasMarkedText() { return true }
+            if let field = control as? NSTextField {
+                parent.text = field.stringValue
+            }
             parent.onSubmit()
             return true
         }

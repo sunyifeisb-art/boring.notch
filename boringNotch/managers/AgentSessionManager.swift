@@ -31,6 +31,7 @@ final class AgentSessionManager: ObservableObject {
     private var lastBridgeRevision: UInt64?
     private var lastBridgeDetailedSessionID: String?
     private var refreshInProgress = false
+    private var refreshRequestedWhileInProgress = false
     private var lastAutomaticCodexUsageRefresh: Date?
     private var lastAutomaticCodexUsageSessionIDs = Set<String>()
     private var activeWorkspaceAccessURL: URL?
@@ -109,9 +110,18 @@ final class AgentSessionManager: ObservableObject {
     }
 
     func refreshSessions(force: Bool = false) async {
-        guard !refreshInProgress else { return }
+        guard !refreshInProgress else {
+            if force { refreshRequestedWhileInProgress = true }
+            return
+        }
         refreshInProgress = true
-        defer { refreshInProgress = false }
+        defer {
+            refreshInProgress = false
+            if refreshRequestedWhileInProgress {
+                refreshRequestedWhileInProgress = false
+                Task { await self.refreshSessions(force: true) }
+            }
+        }
 
         let detailSessionID = BoringViewCoordinator.shared.currentView == .agents
             ? visibleConversationSessionID : nil
@@ -471,7 +481,7 @@ final class AgentSessionManager: ObservableObject {
                     BoringViewCoordinator.shared.currentView = .agents
                 }
             }
-            await refreshSessions()
+            await refreshSessions(force: true)
         }
     }
 
@@ -518,7 +528,7 @@ final class AgentSessionManager: ObservableObject {
                     BoringViewCoordinator.shared.currentView = .agents
                 }
             }
-            await refreshSessions()
+            await refreshSessions(force: true)
         }
     }
 
