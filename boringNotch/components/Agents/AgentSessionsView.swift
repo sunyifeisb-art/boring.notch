@@ -11,7 +11,8 @@ import UniformTypeIdentifiers
 struct AgentSessionsView: View {
     @EnvironmentObject private var vm: BoringViewModel
     @ObservedObject private var manager = AgentSessionManager.shared
-    @State private var draft = ""
+    @State private var composerDraft = AgentComposerDraftStore()
+    @State private var composerCanSend = false
     @State private var pendingNewConversationPrompt: String?
     @State private var detailSessionID: String?
     @State private var showsDirectoryPicker = false
@@ -582,12 +583,13 @@ struct AgentSessionsView: View {
             }
 
             AgentComposerTextField(
-                text: $draft,
+                draft: composerDraft,
                 isFocused: $composerFocused,
                 placeholder: composerPlaceholder(for: target),
                 fontSize: showsTarget ? 11 : 12.5,
                 focusRequest: composerFocusRequest,
                 clearRequest: composerClearRequest,
+                onCanSendChange: { composerCanSend = $0 },
                 onSubmit: { sendDraft(to: target) }
             )
                 .frame(maxWidth: .infinity)
@@ -618,7 +620,7 @@ struct AgentSessionsView: View {
     }
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        composerCanSend
     }
 
     private func composerPlaceholder(for target: AgentSession?) -> String {
@@ -628,10 +630,12 @@ struct AgentSessionsView: View {
     }
 
     private func sendDraft(to target: AgentSession?) {
-        let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let message = composerDraft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else { return }
-        draft = ""
-        composerClearRequest &+= 1
+        composerDraft.text = ""
+        composerDraft.clearGeneration &+= 1
+        composerCanSend = false
+        composerClearRequest = composerDraft.clearGeneration
         NotificationCenter.default.post(name: .agentMessageSubmitted, object: nil)
 
         if message == "/history", let target {
@@ -2126,13 +2130,19 @@ private struct AgentComposerWindowReader: NSViewRepresentable {
     }
 }
 
+private final class AgentComposerDraftStore {
+    var text = ""
+    var clearGeneration = 0
+}
+
 private struct AgentComposerTextField: NSViewRepresentable {
-    @Binding var text: String
+    let draft: AgentComposerDraftStore
     @Binding var isFocused: Bool
     let placeholder: String
     let fontSize: CGFloat
     let focusRequest: Int
     let clearRequest: Int
+    let onCanSendChange: (Bool) -> Void
     let onSubmit: () -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -2140,7 +2150,7 @@ private struct AgentComposerTextField: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSTextField {
-        let field = AgentFocusableTextField(string: text)
+        let field = AgentFocusableTextField(string: draft.text)
         field.isBordered = false
         field.isBezeled = false
         field.drawsBackground = false
@@ -2157,22 +2167,35 @@ private struct AgentComposerTextField: NSViewRepresentable {
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         field.delegate = context.coordinator
         context.coordinator.field = field
+        context.coordinator.lastFontSize = fontSize
+        context.coordinator.lastAppliedClearRequest = draft.clearGeneration
         updatePlaceholder(for: field)
+        context.coordinator.lastPlaceholder = placeholder
+        context.coordinator.lastPlaceholderFontSize = fontSize
+        context.coordinator.lastCanSend = !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         return field
     }
 
     func updateNSView(_ field: NSTextField, context: Context) {
         context.coordinator.parent = self
-        field.font = .systemFont(ofSize: fontSize)
+        if context.coordinator.lastFontSize != fontSize {
+            field.font = .systemFont(ofSize: fontSize)
+            context.coordinator.lastFontSize = fontSize
+        }
         if context.coordinator.lastAppliedClearRequest != clearRequest {
             context.coordinator.lastAppliedClearRequest = clearRequest
-            field.stringValue = text
-        } else if field.currentEditor() == nil && field.stringValue != text {
-            // SwiftUI may deliver a stale binding during typing or IME
-            // composition. Leave AppKit's active field editor untouched.
-            field.stringValue = text
+            context.coordinator.lastCanSend = !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            field.stringValue = draft.text
+            if let editor = field.currentEditor() {
+                editor.string = draft.text
+            }
         }
-        updatePlaceholder(for: field)
+        if context.coordinator.lastPlaceholder != placeholder
+            || context.coordinator.lastPlaceholderFontSize != fontSize {
+            updatePlaceholder(for: field)
+            context.coordinator.lastPlaceholder = placeholder
+            context.coordinator.lastPlaceholderFontSize = fontSize
+        }
 
         guard focusRequest > 0,
               context.coordinator.lastAppliedFocusRequest != focusRequest
@@ -2197,6 +2220,10 @@ private struct AgentComposerTextField: NSViewRepresentable {
         weak var field: NSTextField?
         var lastAppliedFocusRequest = 0
         var lastAppliedClearRequest = 0
+        var lastFontSize: CGFloat?
+        var lastPlaceholder: String?
+        var lastPlaceholderFontSize: CGFloat?
+        var lastCanSend = false
 
         init(parent: AgentComposerTextField) {
             self.parent = parent
@@ -2204,7 +2231,8 @@ private struct AgentComposerTextField: NSViewRepresentable {
 
         func controlTextDidChange(_ notification: Notification) {
             guard let field = notification.object as? NSTextField else { return }
-            parent.text = field.stringValue
+            guard parent.draft.clearGeneration == lastAppliedClearRequest else { return }
+            updateDraft(field.stringValue)
         }
 
         func controlTextDidBeginEditing(_ notification: Notification) {
@@ -2212,17 +2240,36 @@ private struct AgentComposerTextField: NSViewRepresentable {
         }
 
         func controlTextDidEndEditing(_ notification: Notification) {
+            if parent.draft.clearGeneration == lastAppliedClearRequest,
+               let field = notification.object as? NSTextField {
+                updateDraft(field.stringValue)
+            }
             parent.isFocused = false
         }
 
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             guard commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
-            if textView.hasMarkedText() { return true }
-            if let field = control as? NSTextField {
-                parent.text = field.stringValue
-            }
+            // Let the input method commit its candidate before Return can
+            // submit the message. Consuming this command discards marked text.
+            if textView.hasMarkedText() { return false }
+            updateDraft(textView.string)
             parent.onSubmit()
+            if parent.draft.clearGeneration != lastAppliedClearRequest {
+                textView.string = parent.draft.text
+                field?.stringValue = parent.draft.text
+                lastAppliedClearRequest = parent.draft.clearGeneration
+                lastCanSend = false
+            }
             return true
+        }
+
+        private func updateDraft(_ value: String) {
+            parent.draft.text = value
+            let canSend = !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if canSend != lastCanSend {
+                lastCanSend = canSend
+                parent.onCanSendChange(canSend)
+            }
         }
 
         func requestFocus() {
